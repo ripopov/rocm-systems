@@ -2178,6 +2178,26 @@ class CodeGenerator:
             or sem.semantic_class in self._READS_DST_CLASSES
         )
 
+    def _operand_size_override(
+        self,
+        enc_name: str,
+        opnd: Operand,
+        sem: InstructionSemantics | None,
+    ) -> str | None:
+        """Return a target-specific generated operand size override."""
+        if (
+            sem is not None
+            and sem.semantic_class
+            in ('vector_cmp', 'vector_cmpx', 'vector_cmp_class', 'vector_cmpx_class')
+            and enc_name.upper() == 'ENC_VOP3'
+            and opnd.is_output
+            and opnd.name in ('vdst', 'sdst')
+            and opnd.operand_type.upper() == 'OPR_SREG'
+            and self.isa_spec.profile.vop3_cmp_sdst_size_bits is not None
+        ):
+            return str(self.isa_spec.profile.vop3_cmp_sdst_size_bits)
+        return None
+
     _VGPR_MSB_SRC_ROLES = ('Src0', 'Src1', 'Src2')
 
     @staticmethod
@@ -5743,9 +5763,13 @@ class CodeGenerator:
                     )
                     operand_size_exprs: dict[str, str] = {}
                     for opnd in inst.operands:
-                        opnd_size_expr = self._gfx1250_matrix_fmt_operand_size_expr(
-                            gfx1250_f8f6f4_shape, opnd.name
+                        opnd_size_expr = self._operand_size_override(
+                            enc.enc_name, opnd, inst_sem
                         )
+                        if opnd_size_expr is None:
+                            opnd_size_expr = self._gfx1250_matrix_fmt_operand_size_expr(
+                                gfx1250_f8f6f4_shape, opnd.name
+                            )
                         if opnd_size_expr is None:
                             opnd_size_expr = self._vbuffer_vaddr_operand_size_expr(
                                 enc.enc_name, opnd.name

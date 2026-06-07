@@ -365,6 +365,11 @@ class IsaProfile(ABC):
         return False
 
     @property
+    def vop3_cmp_sdst_size_bits(self) -> int | None:
+        """Explicit VOP3 compare destination width, if target-specific."""
+        return None
+
+    @property
     def waitcnt_decode(self) -> str:
         """Return C++ code block that decodes a WAITCNT immediate into
         vmcnt, expcnt, and lgkmcnt local variables.
@@ -1459,6 +1464,10 @@ class Rdna4Profile(_AmdgpuProfileBase):
     @property
     def has_vopd(self) -> bool:
         return True
+
+    @property
+    def vop3_cmp_sdst_size_bits(self) -> int | None:
+        return 32
 
     @property
     def vopd_slot_ops(self) -> tuple[VopdSlotOp, ...]:

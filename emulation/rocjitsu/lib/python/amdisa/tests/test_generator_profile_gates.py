@@ -793,6 +793,7 @@ def test_gfx1250_profile_enables_generator_backed_quirks():
     assert profile.hwreg_wave_sched_mode_id == 26
     assert profile.generate_scaled_wmma_vop3px2
     assert profile.smem_address_uses_access_size
+    assert profile.vop3_cmp_sdst_size_bits == 32
 
 
 def test_rdna3_profile_enables_gfx11_vop3_true16_only():
@@ -813,6 +814,20 @@ def test_rdna4_profile_enables_gfx12_true16_but_keeps_gfx1250_quirks_disabled():
     assert profile.hwreg_wave_sched_mode_id is None
     assert not profile.generate_scaled_wmma_vop3px2
     assert not profile.smem_address_uses_access_size
+    assert profile.vop3_cmp_sdst_size_bits == 32
+
+
+def test_rdna4_vop3_compare_sdst_uses_wave32_mask_size():
+    codegen = object.__new__(CodeGenerator)
+    codegen.isa_spec = SimpleNamespace(profile=Rdna4Profile())
+    sem = SimpleNamespace(semantic_class='vector_cmp')
+
+    dst = SimpleNamespace(is_output=True, name='vdst', operand_type='OPR_SREG')
+    src = SimpleNamespace(is_output=False, name='src0', operand_type='OPR_SRC')
+
+    assert codegen._operand_size_override('ENC_VOP3', dst, sem) == '32'
+    assert codegen._operand_size_override('ENC_VOPC', dst, sem) is None
+    assert codegen._operand_size_override('ENC_VOP3', src, sem) is None
 
 
 def test_ds_swizzle_generator_uses_addr_source_for_ds_and_vds():
