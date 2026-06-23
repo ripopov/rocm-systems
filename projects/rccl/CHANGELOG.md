@@ -10,6 +10,7 @@ Full documentation for RCCL is available at [https://rccl.readthedocs.io](https:
 * Compatibility with NCCL 2.28.9.
 * Added proxytrace profiler plugin and core proxy-diagnostics hooks (`RCCL_PROXYTRACE`).
 * Added `ncclBarrierSession` LSA validation for barrier sessions.
+* Added unit tests for the RCCL Device API in `rccl-UnitTestsFixtures` (`DeviceApi.LsaRemoteRead`, `DeviceApi.CuMemDisabled`, `DeviceApi.WinDisabled`) covering LSA symmetric remote read and `ncclDevCommCreate` gating under `NCCL_CUMEM_ENABLE` / `NCCL_WIN_ENABLE`.
 * Added symmetric-memory ReduceScatter kernel (`RailA2A_LsaLD`) on gfx942/gfx950.
 * Added bias (accumulation) AllReduce on gfx1250 (MI450).
 * Added optimized scale-up ReduceScatter, AllGather, and AllToAll kernels.
