@@ -87,6 +87,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -2185,7 +2186,7 @@ configure_pc_sampling_on_all_agents(uint64_t                        buffer_size,
         {
             config_match_found = true;
             int flags          = 0;
-            ROCPROFILER_CALL(
+            ROCPROFILER_CHECK_USER_CONFIG(
                 rocprofiler_configure_pc_sampling_service(get_client_ctx(),
                                                           itr->id,
                                                           method,
@@ -2851,7 +2852,15 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
         }
         else if(perfcounter_ctrl != 0 || !att_perf.empty())
         {
-            ROCP_FATAL << "ATT Perf requires setting both perfcounter_ctrl and perfcounter list!";
+            // Invalid user combination: only one of the two required perfcounter
+            // options was supplied. Report a clean, actionable error and exit
+            // non-zero instead of aborting (which would raise SIGABRT and go
+            // through the process error/signal handler).
+            ROCP_ERROR << "ATT perfcounter collection requires both '--att-perfcounters' (the "
+                          "perfcounter list) and '--att-perfcounter-ctrl' (the control value) to "
+                          "be set together; only one was provided. Please set both options or "
+                          "neither.";
+            std::exit(EXIT_FAILURE);
         }
 
         auto gpu_idx_set = std::set<uint64_t>{};
@@ -2919,7 +2928,7 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
                 agent_params.push_back(counter);
             if(!handle_consecutive_kernels && !handle_marker_trace)
             {
-                ROCPROFILER_CALL(
+                ROCPROFILER_CHECK_USER_CONFIG(
                     rocprofiler_configure_dispatch_thread_trace_service(get_client_ctx(),
                                                                         id,
                                                                         agent_params.data(),
@@ -2931,7 +2940,7 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* tool_data)
             }
             else
             {
-                ROCPROFILER_CALL(
+                ROCPROFILER_CHECK_USER_CONFIG(
                     rocprofiler_configure_device_thread_trace_service(att_device_context,
                                                                       agent.id,
                                                                       agent_params.data(),
@@ -3908,6 +3917,23 @@ rocprofv3_error_signal_handler(int signo, siginfo_t* info, void* ucontext)
     auto this_tid  = common::get_tid();
     auto this_func = std::string_view{__FUNCTION__};
 
+    // Guard against same-thread re-entrancy. The cleanup below is not
+    // async-signal-safe (logging, finalize, executing chained handlers). If a
+    // chained handler re-raises the signal (e.g. glog/abseil re-aborting on
+    // SIGABRT after it has restored this handler), the handler is re-entered on
+    // the same thread. The std::call_once below would then deadlock (recursive
+    // call_once on the owning thread), so rocprofv3 hangs forever instead of
+    // exiting. On recursive entry, restore the default disposition and re-raise
+    // so the process terminates immediately rather than looping.
+    static std::atomic<long> _owner_tid{-1};
+    const auto               _self_tid = static_cast<long>(this_tid);
+    if(_owner_tid.load(std::memory_order_acquire) == _self_tid)
+    {
+        ::signal(signo, SIG_DFL);
+        ::raise(signo);
+        ::_exit(128 + signo);
+    }
+
     ROCP_WARNING << fmt::format("[PPID={}][PID={}][TID={}][{}] rocprofv3 caught signal {}...",
                                 this_ppid,
                                 this_pid,
@@ -3917,6 +3943,11 @@ rocprofv3_error_signal_handler(int signo, siginfo_t* info, void* ucontext)
 
     static auto _once = std::once_flag{};
     std::call_once(_once, [&]() {
+        // record the owning thread so that a recursive re-entry (e.g. a chained
+        // handler that re-raises the signal) is detected at the top of the
+        // handler instead of deadlocking here.
+        _owner_tid.store(_self_tid, std::memory_order_release);
+
         auto get_children = [&this_pid]() {
             auto fname    = fmt::format("/proc/{}/task/{}/children", this_pid, this_pid);
             auto ifs      = std::ifstream{fname};
@@ -4033,7 +4064,13 @@ rocprofv3_error_signal_handler(int signo, siginfo_t* info, void* ucontext)
 
     // below is for testing purposes. re-raising the signal causes CTest to ignore WILL_FAIL ON
     if(signal_handler_exit) ::quick_exit(signo);
+
+    // restore the default disposition before re-raising so that, even if a
+    // chained handler re-installed this handler during cleanup, the re-raise
+    // terminates the process instead of re-entering and looping.
+    ::signal(signo, SIG_DFL);
     ::raise(signo);
+    ::_exit(128 + signo);
 }
 
 int
