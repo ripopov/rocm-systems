@@ -192,7 +192,10 @@
   X(HostWaitUntilAnyStatus,    147)  \
   X(HostWaitUntilSomeStatus,   148)  \
   X(TeamReduceScatter,         149)  \
-  X(BroadcastWave,             150)
+  X(BroadcastWave,             150)  \
+  X(TileReduce,                152)  \
+  X(TileReduceWave,            153)  \
+  X(TileReduceWG,              154)
 
 #define _ROCSHMEM_ENUM_ENTRY(name, val) name##TestType = val,
 enum TestType {

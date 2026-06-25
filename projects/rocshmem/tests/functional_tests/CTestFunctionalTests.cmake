@@ -166,6 +166,9 @@ set(TEST_host_wait_until_any_status 147)
 set(TEST_host_wait_until_some_status 148)
 set(TEST_teamreducescatter 149)
 set(TEST_broadcast_wave 150)
+set(TEST_tile_reduce 152)
+set(TEST_tile_reduce_wave 153)
+set(TEST_tile_reduce_wg 154)
 
 # MPI should already be found by the parent CMakeLists.txt
 # Use standard CMake MPI variables set by find_package(MPI)
@@ -1310,6 +1313,16 @@ function(add_tile_tests)
         # Workgroup-level allgather
         add_rocshmem_functional_test(NAME tile_allgather_wg RANKS 2 WORKGROUPS 1 THREADS 1024)
         add_rocshmem_functional_test(NAME tile_allgather_wg RANKS 4 WORKGROUPS 1 THREADS 1024)
+    end_test_group()
+
+    begin_test_group(CATEGORY "TILE;COLLECTIVE;REDUCE" TIER comprehensive BACKENDS "ipc" GPUS "all")
+        # Each tile_reduce test exercises sum, max, and min reductions.
+        add_rocshmem_functional_test(NAME tile_reduce RANKS 2 WORKGROUPS 1 THREADS 1)
+        add_rocshmem_functional_test(NAME tile_reduce RANKS 4 WORKGROUPS 1 THREADS 1)
+        add_rocshmem_functional_test(NAME tile_reduce_wave RANKS 2 WORKGROUPS 1 THREADS 64)
+        add_rocshmem_functional_test(NAME tile_reduce_wave RANKS 4 WORKGROUPS 1 THREADS 64)
+        add_rocshmem_functional_test(NAME tile_reduce_wg RANKS 2 WORKGROUPS 1 THREADS 1024)
+        add_rocshmem_functional_test(NAME tile_reduce_wg RANKS 4 WORKGROUPS 1 THREADS 1024)
     end_test_group()
 endfunction()
 
