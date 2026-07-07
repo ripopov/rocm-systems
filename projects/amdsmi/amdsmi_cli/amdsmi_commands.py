@@ -26,6 +26,7 @@ import sys
 from amdsmi_helpers import AMDSMIHelpers
 from amdsmi_logger import AMDSMILogger
 from amdsmi import amdsmi_exception, amdsmi_interface
+from amdsmi_cli_exceptions import AmdSmiExitCode, library_code_to_exit_code
 
 from subcommands import (
     BadPagesCommands,
@@ -114,7 +115,10 @@ class AMDSMICommands(
                         "Unable to get devices, driver not initialized (amdgpu not found in modules)"
                     )
                 else:
-                    raise e
+                    # Fatal init error: exit with the real status (folded to a byte),
+                    # not an uncaught traceback -> exit 1 (== AMDSMI_STATUS_INVAL).
+                    logging.exception("Unexpected library error during GPU device init")
+                    sys.exit(library_code_to_exit_code(e.err_code))
 
             if len(self.device_handles) == 0:
                 # No GPU's found post amdgpu driver initialization
@@ -143,7 +147,10 @@ class AMDSMICommands(
                         "Unable to get devices, driver not initialized (BRCMNIC not found in modules)"
                     )
                 else:
-                    raise e
+                    # Fatal init error: exit with the real status (folded to a byte),
+                    # not an uncaught traceback -> exit 1 (== AMDSMI_STATUS_INVAL).
+                    logging.exception("Unexpected library error during NIC device init")
+                    sys.exit(library_code_to_exit_code(e.err_code))
 
         # Resolve the node handle (independent of AINIC init; needed for amd-smi node).
         for dev in self.device_handles:
@@ -170,7 +177,10 @@ class AMDSMICommands(
                         "Unable to detect any CPU devices, check amd_hsmp (or) hsmp_acpi version and module status (sudo modprobe amd_hsmp (or) sudo modprobe hsmp_acpi)"
                     )
                 else:
-                    raise e
+                    # Fatal init error: exit with the real status (folded to a byte),
+                    # not an uncaught traceback -> exit 1 (== AMDSMI_STATUS_INVAL).
+                    logging.exception("Unexpected library error during CPU device init")
+                    sys.exit(library_code_to_exit_code(e.err_code))
 
             # core handles
             try:
@@ -184,7 +194,10 @@ class AMDSMICommands(
                         "Unable to get CORE devices, amd_hsmp driver not loaded (sudo modprobe amd_hsmp)"
                     )
                 else:
-                    raise e
+                    # Fatal init error: exit with the real status (folded to a byte),
+                    # not an uncaught traceback -> exit 1 (== AMDSMI_STATUS_INVAL).
+                    logging.exception("Unexpected library error during CORE device init")
+                    sys.exit(library_code_to_exit_code(e.err_code))
 
             if len(self.cpu_handles) == 0 and len(self.core_handles) == 0:
                 # No CPU's found post amd_hsmp driver initialization
@@ -199,7 +212,7 @@ class AMDSMICommands(
             version_args.cpu_version = False
             version_args.nic_version = False
             self.version(version_args)
-            sys.exit(-1)
+            sys.exit(int(AmdSmiExitCode.DEVICE_NOT_FOUND))
 
     def profile(self, args):
         """Not applicable to linux baremetal"""

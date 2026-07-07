@@ -74,6 +74,45 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 ### Changed
 
+- **Reworked `amd-smi` CLI process exit codes.**  
+  How exit codes are chosen:
+  - Library failures exit with the underlying `AMDSMI_STATUS_*` value (0-56).
+  - CLI-only errors use dedicated codes in the reserved 192-255 band.
+  - When more than one failure with different codes is recorded in a single run — across devices, or across sub-steps of one command (e.g. `reset --clocks`) — the process exits `205`.
+
+  Multi-device `set`/`reset` behavior:
+  - A per-device GPU failure is now recorded, and the command continues to the remaining devices.
+  - The exit code is decided once, after every device has been attempted. Previously a single device failure could abort the loop early.
+
+  Notable value changes (many cases previously aliased onto `1`/`2`; each now has a distinct code):
+
+  | Case | Was | Now |
+  | --- | --- | --- |
+  | Import failure | `1` | `192` |
+  | Invalid command | `1` | `193` |
+  | Invalid parameter | `2` | `194` |
+  | Device not found | `3` | `195` |
+  | Invalid file path | `4` | `196` |
+  | Invalid parameter value | `5` | `197` |
+  | Missing parameter value | `6` | `198` |
+  | Command not supported (CLI, parse-time) | `7` | `199` (distinct from library `NOT_SUPPORTED` = `2`) |
+  | Required target/argument missing | `9` | `201` |
+  | Invalid subcommand | `10` | `202` |
+  | Permission denied | `11` | `10` (real `AMDSMI_STATUS_NO_PERM`) |
+  | Mixed device/field failures (differing codes) | — | `205` |
+  | `amdsmi_init()` watchdog timeout | `2` | `206` |
+  | Drivers not loaded | `1` | `207` |
+  | Interactive confirmation declined | `1` | `208` |
+  | Library (device) failure | `(1000 + status)` wrapped to a byte | underlying `AMDSMI_STATUS_*` (`0`-`56`) |
+  | Unknown/unmapped library error | `100` | `255` (library `UNKNOWN_ERROR` folded to a byte) |
+
+  The `Was`/`Now` values are process exit codes (`$?`). Previously the printed `code` field showed the *negative* of these (e.g. `-7`) while the process exited with the absolute value (`7`); the rework makes the printed `code` and `$?` agree (both `199`).
+
+- **`amd-smi set --power-cap` now applies per GPU instead of aborting on the first out-of-range device.**  
+  - Each GPU is validated against its own reported range.
+  - An out-of-range value on one GPU is reported for that GPU, while in-range GPUs still apply.
+  - The process exit code reflects the per-device failure.
+
 - **Normalized JSON/CSV key casing in `amd-smi metric` clock and temperature sections**.  
   - The `uclk_aid`, `socclks_mid`, and temperature `xcd` keys are now lowercase (`aid_<N>`, `mid_<N>`, `xcp_<N>`) in JSON and CSV output, matching the existing `xcp_<N>` usage keys; they were previously uppercase (`AID_<N>`, `MID_<N>`, `XCP_<N>`).
   - Human-readable output is unchanged, since it uppercases all keys.
@@ -92,11 +131,18 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 ### Removed
 
+- **Removed the internal `amd-smi` CLI exception classes `AmdSmiParameterNotSupportedException` and `AmdSmiUnknownErrorException`**.  
+  These were CLI-internal (not part of the public `amdsmi` Python library), their exit-code behavior is superseded by the reworked CLI process exit codes described above.
+
 - **Removed the non-functional `--decode` flag from `amd-smi ras`**. Out-of-band CPER decoding is available via `amd-smi ras --afid --cper-file <path>` or `--afid --folder <DIR>`.
 
 - **Removed the unused `amdsmi_nic_link_type_t` enum from the public header**. No API or struct referenced it; NIC link types are reported through `amdsmi_link_type_t`, which gains `AMDSMI_LINK_TYPE_NUMA` and `AMDSMI_LINK_TYPE_XNUMA` in this release.
 
 ### Resolved Issues
+
+- **Fixed `amd-smi set`/`reset` on a GPU silently exiting `0` after a per-device failure.**  
+  - A device error during GPU `set`/`reset` is now recorded, so the process exits with a non-zero code instead of reporting success.
+  - Example: `set --memory-partition` on a GPU that does not support it.
 
 - **Fixed `amd-smi set --power-cap` rejecting the minimum allowed value**.  
   - The lower bound is now inclusive, so setting the power cap to the exact minimum of the reported range (e.g. `210` when the range is 210-300W) succeeds instead of failing validation, matching the inclusive range shown in the error message.
