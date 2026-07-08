@@ -10,6 +10,53 @@
 
 #include "common_cast.h"
 
+// CTS FIFO element and stride helpers.
+// The CTS FIFO buffers (ctsFifo, remCtsFifo.elems) are declared as
+// ncclIbSendFifo arrays (64B per element). When IbCastUseInline is true the
+// same memory is reinterpreted at ncclIbSendFifoCtsInline stride (32B),
+// packing entries contiguously so a single SGE can cover n entries.
+// All element lookups must go through proper typecast so correct stride 
+// is used, and all field reads/writes must go through the ctsFifoXxx
+// accessors so the correct field layout is used.
+
+// --- Field accessors (layout-aware) ---
+static inline int ctsFifoNreqs(volatile struct ncclIbSendFifo* slot) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->nreqs;
+  return (int)slot->nreqs;
+}
+static inline uint64_t ctsFifoAddr(volatile struct ncclIbSendFifo* slot) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->addr;
+  return slot->addr;
+}
+static inline uint16_t ctsFifoRxReqIndex(volatile struct ncclIbSendFifo* slot) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->rxReqIndex;
+  return slot->rxReqIndex;
+}
+static inline uint32_t ctsFifoRkey(volatile struct ncclIbSendFifo* slot, int devIdx) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    // in SendFifoCtsInline only 1 key stored
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->rkeys[0];
+  return slot->rkeys[devIdx];
+}
+static inline uint64_t ctsFifoIdx(volatile struct ncclIbSendFifo* slot) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->idx;
+  return slot->idx;
+}
+static inline int ctsFifoSize(volatile struct ncclIbSendFifo* slot) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->size;
+  return (int)slot->size;
+}
+static inline int ctsFifoTag(volatile struct ncclIbSendFifo* slot) {
+  if (IbCastAinicRoce && IbCastUseInline)
+    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->tag;
+  return (int)slot->tag;
+}
+
 #define NCCL_IB_FLUSH_REQ_WR_ID_OFFSET 0x1000
 static_assert(NCCL_IB_FLUSH_REQ_WR_ID_OFFSET > NET_IB_MAX_REQUESTS, "wr_id offset for flush requests must be greater than NET_IB_MAX_REQUESTS");
 static_assert(NCCL_IB_FLUSH_REQ_WR_ID_OFFSET <= UINT64_MAX - NET_IB_MAX_REQUESTS, "wr_id for flush requests must fit in 64 bits since ibv_send_wr::wr_id is 64 bits");

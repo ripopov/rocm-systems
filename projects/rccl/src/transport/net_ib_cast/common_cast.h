@@ -145,7 +145,6 @@ extern bool IbCastUseInline;
 #define WR_IMM_SIZE_MASK        0x007fffff
 extern int IbCastGdrFlushDisable;
 extern bool IbCastAinicRoce;
-extern bool rcclCtsInlineData;
 extern bool IbCastOffloadEnabled;
 extern int64_t rcclParamIbCastP2pDisableCts();
 
@@ -370,7 +369,7 @@ struct alignas(32) ncclIbSendFifoCtsInline {
   uint16_t rxReqIndex;
   uint16_t tag;
   uint32_t idx;
-  char padding[9];
+  char padding[7];
 } __attribute__((packed));
 
 struct ncclIbQpInitAttr {

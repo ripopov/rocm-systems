@@ -514,9 +514,11 @@ ncclResult_t IbCastInitDevices(ncclDebugLogger_t logFunction, ncclProfilerCallba
       if (IbCastOffloadEnabled && rcclUseIbCastQpSched()) {
         INFO(NCCL_INIT|NCCL_NET, "NET/IB : CAST enabled - disabling CTS Inline Data and CTS Offload (not yet supported with CAST)");
         IbCastOffloadEnabled = false;
+        IbCastUseInline = false;
+      } else if (IbCastOffloadEnabled && !IbCastUseInline) {
+        INFO(NCCL_INIT|NCCL_NET, "NET/IB : CTS Inline Data is disabled and CTS Offload is enabled - enabling CTS Inline Data");
+        IbCastUseInline = true;
       }
-      // for AINIC IbUseInline is enabled by default always
-      IbCastUseInline = true;
 
       INFO(NCCL_INIT|NCCL_NET, "NET/IB : AINIC RoCEv2 optimizations enabled: CTS Inline Data: %s; CTS Offload: %s; "
            "IB Use Inline: enabled; GDR Flush: disabled", IbCastUseInline ? "Enabled": "Disabled",

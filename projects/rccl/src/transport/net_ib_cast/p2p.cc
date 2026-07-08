@@ -101,7 +101,7 @@ static ncclResult_t IbCastPrintWr(struct ibv_send_wr* wr, char* wrStr) {
 ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, int startQpIndex, bool wrrSched, bool useWriteOp) {
   struct ncclIbRequest** reqs = comm->sendReqs[slot];
   volatile struct ncclIbSendFifo* slots = comm->ctsFifo[slot];
-  int nreqs = comm->useCtsOffload ? 1 : slots[0].nreqs;
+  int nreqs = comm->useCtsOffload ? 1 : ctsFifoNreqs(&slots[0]);
   uint64_t nowNs = 0;
   if (nreqs > NCCL_NET_IB_MAX_RECVS) return ncclInternalError;
 
@@ -116,7 +116,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
     sge->addr=(uintptr_t)reqs[r]->send.data;
     wr->opcode = IBV_WR_RDMA_WRITE;
     wr->send_flags = 0;
-    wr->wr.rdma.remote_addr = comm->useCtsOffload ? 0xdeadbeef : slots[r].addr;
+    wr->wr.rdma.remote_addr = comm->useCtsOffload ? 0xdeadbeef : ctsFifoAddr(&slots[r]);
     wr->next = wr + 1;
     wr_id += (uint64_t)(slot & 0xff) << (r*8);
     wr->wr_id = wr_id;
@@ -148,7 +148,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
     if (comm->base.recvMatchingScheme != BY_INDEX) {
       immData = (uint32_t)(reqs[0]->id % UINT32_MAX);
     } else {
-      uint32_t rxReqIdx = (uint32_t)slots[0].rxReqIndex;
+      uint32_t rxReqIdx = (uint32_t)ctsFifoRxReqIndex(&slots[0]);
       immData = (rxReqIdx << WR_IMM_RX_REQ_IDX_SHIFT);
       if (nqps > 1) {
         immData |= WR_IMM_SPLIT_DATA_FLAG;
@@ -199,7 +199,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
       //IbCastAddEvent(reqs[r], devIndex);
 
       // Select proper rkey (needed even for 0-size send)
-      comm->wrs[r].wr.rdma.rkey = comm->useCtsOffload ? 0xbade : slots[r].rkeys[qp->remDevIdx];
+      comm->wrs[r].wr.rdma.rkey = comm->useCtsOffload ? 0xbade : ctsFifoRkey(&slots[r], qp->remDevIdx);
 
       int chunkSize, length;
       if ((nqps > 1) && reqs[r]->desc.parms.enable && comm->base.qpTxSchedInit) {
@@ -372,26 +372,26 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
   if (!comm->useCtsOffload) {
     slots = comm->ctsFifo[slot];
     uint32_t idx = (uint32_t)(comm->base.fifoHead+1);
-    if (slots[0].idx != idx) { *request = NULL; return ncclSuccess; }
-    nreqs = slots[0].nreqs;
+    if (ctsFifoIdx(&slots[0]) != idx) { *request = NULL; return ncclSuccess; }
+    nreqs = ctsFifoNreqs(&slots[0]);
     // Wait until all data has arrived
-    for (int r=1; r<nreqs; r++) while(slots[r].idx != idx);
+    for (int r=1; r<nreqs; r++) while(ctsFifoIdx(&slots[r]) != idx);
     std::atomic_thread_fence(std::memory_order_seq_cst); // order the nreqsPtr load against tag/rkey/addr loads below
   }
 
-
   for (int r=0; r<nreqs; r++) {
     if (!comm->useCtsOffload) {
-      if (reqs[r] != NULL || slots[r].tag != tag) continue;
+      if (reqs[r] != NULL || ctsFifoTag(&slots[r]) != tag) continue;
 
-      if (size > slots[r].size) size = slots[r].size;
+      int slotSize = ctsFifoSize(&slots[r]);
+      if (size > (size_t)slotSize) size = slotSize;
       // Sanity checks
-      if (slots[r].size < 0 || slots[r].addr == 0 || slots[r].rkeys[0] == 0) {
+      if (slotSize < 0 || ctsFifoAddr(&slots[r]) == 0 || ctsFifoRkey(&slots[r], 0) == 0) {
         char line[SOCKET_NAME_MAXLEN + 1];
         union ncclSocketAddress addr;
         ncclSocketGetAddr(&comm->base.sock, &addr);
-        WARN("NET/IB : req %d/%d tag %x peer %s posted incorrect receive info: size %ld addr %lx rkeys[0]=%x",
-          r, nreqs, tag, ncclSocketToString(&addr, line), slots[r].size, slots[r].addr, slots[r].rkeys[0]);
+        WARN("NET/IB : req %d/%d tag %x peer %s posted incorrect receive info: size %d addr %lx rkeys[0]=%x",
+          r, nreqs, tag, ncclSocketToString(&addr, line), slotSize, ctsFifoAddr(&slots[r]), ctsFifoRkey(&slots[r], 0));
         return ncclInternalError;
       }
     }
@@ -500,7 +500,10 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* r
   struct ncclIbSendFifo* localElem = comm->remCtsFifo.elems[slot];
   wr.sg_list = &(comm->devs[ctsQp->devIndex].sge);
   wr.sg_list[0].addr = (uint64_t)localElem;
-  wr.sg_list[0].length = comm->useCtsOffload ? MAX_INLINE_DATA_SIZE : n*sizeof(struct ncclIbSendFifo);
+  if (IbCastAinicRoce && IbCastUseInline)
+    wr.sg_list[0].length = MAX_INLINE_DATA_SIZE;
+  else
+    wr.sg_list[0].length = n*sizeof(struct ncclIbSendFifo);
   wr.num_sge = 1;
 
   wr.opcode = IBV_WR_RDMA_WRITE;
@@ -639,13 +642,15 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
   struct ncclIbSendFifo* localElem = comm->remCtsFifo.elems[slot];
   for (int i=0; i<n; i++) {
     struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandles[i];
-    if (comm->useCtsOffload) {
+    if (IbCastAinicRoce && IbCastUseInline) {
       struct ncclIbSendFifoCtsInline* localElemCtsInline = (struct ncclIbSendFifoCtsInline*)&localElem[i];
-      localElemCtsInline[i].addr = (uint64_t)data[i];
-      localElemCtsInline[i].rkeys[0] = mhandleWrapper->mrs[0]->rkey;
-      localElemCtsInline[i].nreqs = n;
-      localElemCtsInline[i].size = sizes[i]; // Sanity/Debugging
-      localElemCtsInline[i].tag = tags[i];
+      localElemCtsInline->addr = (uint64_t)data[i];
+      localElemCtsInline->rkeys[0] = mhandleWrapper->mrs[0]->rkey;
+      localElemCtsInline->nreqs = n;
+      localElemCtsInline->size = sizes[i]; // Sanity/Debugging
+      localElemCtsInline->tag = tags[i]; 
+      localElemCtsInline->idx = (uint32_t)comm->base.fifoHead+1;
+      localElemCtsInline->rxReqIndex = rxReqIndex;
     } else {
       localElem[i].addr = (uint64_t)data[i];
       // Send all applicable rkeys
