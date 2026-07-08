@@ -64,6 +64,7 @@
 #include "team_fcollect_tester.hpp"
 #include "team_reduction_tester.hpp"
 #include "team_reduce_scatter_tester.hpp"
+#include "team_reduce_scatter_wave_tester.hpp"
 #include "wavefront_primitives.hpp"
 #include "workgroup_primitives.hpp"
 #include "flood_tester.hpp"
@@ -153,6 +154,7 @@ Tester::Tester(TesterArguments args) : args(args) {
       case BroadcastWaveTestType:
       case TeamReductionTestType:
       case TeamReduceScatterTestType:
+      case TeamReduceScatterWaveTestType:
       case TeamFCollectTestType:
       case CollectTestType:
       case TeamAllToAllTestType:
@@ -299,6 +301,22 @@ std::vector<Tester*> Tester::create(TesterArguments args) {
     case TeamReduceScatterTestType:
       test_name = "Team-based Reduce-Scatter";
       testers.push_back(new TeamReduceScatterTester<float, ROCSHMEM_SUM>(
+          args,
+          [](float& f1, float& f2) {
+            f1 = 1;
+            f2 = 0;
+          },
+          [](float v, float n_pes) {
+            return (v == n_pes)
+                       ? std::make_pair(true, "")
+                       : std::make_pair(false, "Got " + std::to_string(v) +
+                                                   ", Expect " +
+                                                   std::to_string(n_pes));
+          }));
+      break;
+    case TeamReduceScatterWaveTestType:
+      test_name = "Team-based Reduce-Scatter Wave";
+      testers.push_back(new TeamReduceScatterWaveTester<float, ROCSHMEM_SUM>(
           args,
           [](float& f1, float& f2) {
             f1 = 1;
@@ -995,6 +1013,7 @@ bool Tester::peLaunchesKernel() {
     case ReduceOnStreamTestType:
     case TeamReductionTestType:
     case TeamReduceScatterTestType:
+    case TeamReduceScatterWaveTestType:
     case TeamBroadcastTestType:
     case TeamCtxInfraTestType:
     case TeamCtxInfraSingleTestType:

@@ -286,6 +286,7 @@ void TesterArguments::get_arguments() {
     case TeamFCollectTestType:
     case TeamReductionTestType:
     case TeamReduceScatterTestType:
+    case TeamReduceScatterWaveTestType:
     case TeamBroadcastTestType:
     case PingAllTestType:
     case TeamBarrierTestType:
