@@ -350,6 +350,7 @@ static size_t wordSize(ncclDataType_t type) {
 }
 
 extern int test_ncclVersion; // init'd with ncclGetVersion()
+extern int broadcast_grouped; // --allgatherv_grouped_bcast: AllGatherV mode for broadcast_perf
 typedef enum { ncclCoarse        = 0,
                ncclFine          = 1,
                ncclHost          = 2,

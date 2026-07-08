@@ -142,6 +142,7 @@ std::string rccl_output_format;
 static int report_cputime = 0;
 static int report_timestamps = 0;
 static int deviceImpl = 0;
+int broadcast_grouped = 0;
 int unalign = 0;
 int memory_report = 0;
 
@@ -1593,13 +1594,14 @@ int main(int argc, char* argv[], char **envp) {
     {"rccl_output_format", required_argument, 0, 'Z'},              //RCCL
     {"rccl_output_file", required_argument, 0, 'X'},                //RCCL (output file for Reporter class)
     {"output_algo_proto_channels", required_argument, 0, 'A'},      //RCCL (changed from M)
+    {"allgatherv_grouped_bcast", no_argument, 0, 'K'},              //RCCL: grouped-bcast mode (AllGatherV) for broadcast_perf
     {"help", no_argument, 0, 'h'},
     {}
   };
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:x:D:V:J:S:M:u:Y:U:O:q:F:E:Z:X:A:", longopts, &longindex);
+    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:N:p:c:o:d:r:z:y:T:hG:C:a:R:x:D:V:J:S:M:u:Y:U:O:q:F:E:Z:X:A:K", longopts, &longindex);
 
     if (c == -1)
       break;
@@ -1748,6 +1750,9 @@ int main(int argc, char* argv[], char **envp) {
       case 'A':
         output_algo_proto_channels = strtol(optarg, NULL, 0);
         break;
+      case 'K':
+        broadcast_grouped = 1;
+        break;
       case 'M':
         memory_report = (int)strtol(optarg, NULL, 0);
         break;
@@ -1834,6 +1839,7 @@ int main(int argc, char* argv[], char **envp) {
             "[-Z,--rccl_output_format <output format <csv|json>] \n\t"                                              //RCCL
             "[-X,--rccl_output_file <file> RCCL Reporter output file for csv/json (used with -Z)] \n\t"             //RCCL
             "[-A,--output_algo_proto_channels <0/1> enable algorithm/protocol/channels output (default: 0)] \n\t"   //RCCL
+            "[-K,--allgatherv_grouped_bcast enable grouped-broadcast (AllGatherV) mode in broadcast_perf] \n\t"     //RCCL
             "[-h,--help]\n",
           basename(argv[0]));
         return 0;
