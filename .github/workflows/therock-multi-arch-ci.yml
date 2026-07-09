@@ -101,13 +101,17 @@ jobs:
           if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
             # For PRs, compute the merge-base to match the actual PR diff
             BASE_REF=$(git merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+            HEAD_REF="${{ github.event.pull_request.head.sha }}"
             echo "Using merge-base for PR: $BASE_REF"
+            echo "PR head SHA: $HEAD_REF"
           else
             # For pushes, compare against the previous commit
             BASE_REF="HEAD^"
+            HEAD_REF="HEAD"
             echo "Using HEAD^ for push"
           fi
           export BASE_REF
+          export HEAD_REF
           python3 .github/scripts/get_changed_projects.py
 
   setup:
