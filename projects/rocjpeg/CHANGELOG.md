@@ -3,6 +3,12 @@
 Documentation for rocJPEG is available at
 [https://rocm.docs.amd.com/projects/rocJPEG/en/latest/](https://rocm.docs.amd.com/projects/rocJPEG/en/latest/)
 
+## Unreleased
+
+### Fixed
+
+* Fixed a potential 32-bit integer overflow in the sample `SaveImage()` host-buffer size calculation that could produce an undersized buffer for large images. Size arithmetic is now performed in `size_t`.
+
 ## rocJPEG 1.6.0 for ROCm 7.14
 
 ### Added
