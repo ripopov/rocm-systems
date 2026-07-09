@@ -90,6 +90,9 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 - **Renamed "AINIC version" to "ionic version" in `amd-smi version` output**.  
   - The label now correctly reflects that it shows the ionic kernel driver version.
 
+- **`amd-smi static` now omits `MEM_CARVEOUT` from default output on hardware without VRAM carveout support**.  
+  - The section is shown only when explicitly requested with `-m`/`--mem-carveout`; unsupported devices report a plain `N/A` instead of a verbose reason string. VRAM carveout is only exposed on carveout-capable APUs.
+
 ### Removed
 
 - **Removed the non-functional `--decode` flag from `amd-smi ras`**. Out-of-band CPER decoding is available via `amd-smi ras --afid --cper-file <path>` or `--afid --folder <DIR>`.
@@ -144,6 +147,9 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 
 - **Fixed fabric telemetry APIs returning the wrong status on non-IFoE systems**.  
   - `amdsmi_alloc_fabric_telemetry()`, `amdsmi_get_fabric_telemetry_data()`, and `amdsmi_free_fabric_telemetry()` now return `AMDSMI_STATUS_NOT_SUPPORTED` on systems without fabric hardware, consistent with `amdsmi_get_gpu_fabric_info()`.
+
+- **Fixed mis-indented `amd-smi static --profile` list in human-readable output**.  
+  - The available power profiles rendered outdented below the following field; plain list items now nest correctly under their key. JSON and CSV output are unchanged, and the `--profile` help text now notes it is only available on Linux Baremetal.
 
 ## amd_smi_lib for ROCm 7.13.0
 
