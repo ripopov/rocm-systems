@@ -668,7 +668,8 @@ class VirtualGPU : public device::VirtualDevice {
   void adjustHeader(uint16_t& header);
 
   //! Dispatches a barrier with blocking HSA signals
-  void dispatchBlockingWait(hsa_kernel_dispatch_packet_t* packet);
+  void dispatchBlockingWait(hsa_kernel_dispatch_packet_t* packet,
+                            hsa_amd_packet_type8_t amd_format = 0);
 
   //! Dispatch (or capture, when graph-capturing) a kernel dispatch packet.
   //! Handles both hsa_kernel_dispatch_packet_t and hsa_amd_ext_kernel_dispatch_packet_t.
