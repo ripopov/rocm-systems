@@ -218,12 +218,148 @@ static bool IsCodeObjectCompressed(const void* image, size_t image_size) {
                      magic_len) == 0;
 }
 
-static bool IsCodeObjectElf(const void* image, size_t image_size) {
-  if (image_size != 0 && image_size < sizeof(amd::Elf64_Ehdr)) {
+static bool CheckedElfRange(uint64_t offset, uint64_t size, size_t image_size, size_t* end) {
+  if (offset > image_size) {
     return false;
   }
-  const amd::Elf64_Ehdr* ehdr = reinterpret_cast<const amd::Elf64_Ehdr*>(image);
-  return ehdr->e_machine == EM_AMDGPU && ehdr->e_ident[EI_OSABI] == ELFOSABI_AMDGPU_HSA;
+  const size_t checked_offset = static_cast<size_t>(offset);
+  if (size > image_size - checked_offset) {
+    return false;
+  }
+  *end = checked_offset + static_cast<size_t>(size);
+  return true;
+}
+
+static bool CheckedElfTableRange(uint64_t offset, uint64_t count, size_t entry_size,
+                                 size_t image_size, size_t* end) {
+  if (offset == 0 || offset > image_size || entry_size == 0) {
+    return false;
+  }
+  const size_t checked_offset = static_cast<size_t>(offset);
+  const size_t available = image_size - checked_offset;
+  if (count > available / entry_size) {
+    return false;
+  }
+  *end = checked_offset + static_cast<size_t>(count) * entry_size;
+  return true;
+}
+
+// Validate every file-backed ELF range against image_size and return the exact
+// byte extent needed by the downstream ELF reader.
+template <typename Ehdr, typename Phdr, typename Shdr>
+static bool GetBoundedElfImageSizeForClass(const void* image, size_t image_size, size_t* elf_size) {
+  if (image_size < sizeof(Ehdr)) {
+    return false;
+  }
+
+  Ehdr ehdr = {};
+  std::memcpy(&ehdr, image, sizeof(ehdr));
+  if (ehdr.e_machine != EM_AMDGPU || ehdr.e_ident[EI_OSABI] != ELFOSABI_AMDGPU_HSA ||
+      ehdr.e_ehsize < sizeof(Ehdr)) {
+    return false;
+  }
+
+  size_t extent = 0;
+  if (!CheckedElfRange(0, ehdr.e_ehsize, image_size, &extent)) {
+    return false;
+  }
+
+  // Extended header counts require section-header-zero decoding. AMDGPU code
+  // objects do not use them, so reject them instead of accepting an ambiguous
+  // or attacker-controlled table size.
+  constexpr uint16_t kExtendedProgramHeaderCount = 0xffff;
+  if (ehdr.e_phnum == kExtendedProgramHeaderCount ||
+      (ehdr.e_shnum == 0 && ehdr.e_shoff != 0)) {
+    return false;
+  }
+
+  if (ehdr.e_phnum != 0) {
+    if (ehdr.e_phentsize < sizeof(Phdr)) {
+      return false;
+    }
+    size_t table_end = 0;
+    if (!CheckedElfTableRange(ehdr.e_phoff, ehdr.e_phnum, ehdr.e_phentsize, image_size,
+                              &table_end)) {
+      return false;
+    }
+    if (table_end > extent) {
+      extent = table_end;
+    }
+
+    const auto* bytes = static_cast<const char*>(image);
+    for (uint64_t i = 0; i < ehdr.e_phnum; ++i) {
+      Phdr phdr = {};
+      const size_t offset = static_cast<size_t>(ehdr.e_phoff) +
+                            static_cast<size_t>(i) * ehdr.e_phentsize;
+      std::memcpy(&phdr, bytes + offset, sizeof(phdr));
+      if (phdr.p_filesz == 0) {
+        continue;
+      }
+      size_t segment_end = 0;
+      if (!CheckedElfRange(phdr.p_offset, phdr.p_filesz, image_size, &segment_end)) {
+        return false;
+      }
+      if (segment_end > extent) {
+        extent = segment_end;
+      }
+    }
+  }
+
+  if (ehdr.e_shnum != 0) {
+    if (ehdr.e_shentsize < sizeof(Shdr)) {
+      return false;
+    }
+    size_t table_end = 0;
+    if (!CheckedElfTableRange(ehdr.e_shoff, ehdr.e_shnum, ehdr.e_shentsize, image_size,
+                              &table_end)) {
+      return false;
+    }
+    if (table_end > extent) {
+      extent = table_end;
+    }
+
+    const auto* bytes = static_cast<const char*>(image);
+    for (uint64_t i = 0; i < ehdr.e_shnum; ++i) {
+      Shdr shdr = {};
+      const size_t offset = static_cast<size_t>(ehdr.e_shoff) +
+                            static_cast<size_t>(i) * ehdr.e_shentsize;
+      std::memcpy(&shdr, bytes + offset, sizeof(shdr));
+      if (shdr.sh_type == SHT_NOBITS || shdr.sh_size == 0) {
+        continue;
+      }
+      size_t section_end = 0;
+      if (!CheckedElfRange(shdr.sh_offset, shdr.sh_size, image_size, &section_end)) {
+        return false;
+      }
+      if (section_end > extent) {
+        extent = section_end;
+      }
+    }
+  }
+
+  *elf_size = extent;
+  return true;
+}
+
+static bool GetBoundedElfImageSize(const void* image, size_t image_size, size_t* elf_size) {
+  if (image_size < EI_NIDENT) {
+    return false;
+  }
+  const auto* ident = static_cast<const unsigned char*>(image);
+  if (ident[EI_MAG0] != ELFMAG0 || ident[EI_MAG1] != ELFMAG1 || ident[EI_MAG2] != ELFMAG2 ||
+      ident[EI_MAG3] != ELFMAG3 || ident[EI_DATA] != ELFDATA2LSB) {
+    return false;
+  }
+
+  if (ident[EI_CLASS] == ELFCLASS32) {
+    return GetBoundedElfImageSizeForClass<amd::Elf32_Ehdr, amd::Elf32_Phdr, amd::Elf32_Shdr>(
+        image, image_size, elf_size);
+  }
+  if (ident[EI_CLASS] == ELFCLASS64) {
+    return GetBoundedElfImageSizeForClass<amd::Elf64_Ehdr, amd::Elf64_Phdr, amd::Elf64_Shdr>(
+        image, image_size, elf_size);
+  }
+  return false;
 }
 
 static bool UncompressAndPopulateCodeObject(
@@ -586,10 +722,8 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
 
   // It better be elf if its neither compressed nor uncompressed
   if (!is_compressed && !is_uncompressed) {
-    if (IsCodeObjectElf(image_, image_size_)) {
-      // getElfSize() walks attacker-controlled offsets, so prefer the known
-      // image bound and only fall back to it when the size is unknown.
-      size_t elf_size = image_size_ != 0 ? image_size_ : amd::Elf::getElfSize(image_);
+    size_t elf_size = 0;
+    if (GetBoundedElfImageSize(image_, image_size_, &elf_size)) {
       for (auto* device : devices) {
         if (hipSuccess != AddDevProgram(device, image_, elf_size, fdesc))
           return hipErrorInvalidImage;
