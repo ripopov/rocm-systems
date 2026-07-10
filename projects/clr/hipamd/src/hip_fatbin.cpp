@@ -553,15 +553,15 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
     }
     // The file size counts the whole file, not the bytes actually mapped at
     // image_, and non-file-backed pointers (raw hipModuleLoadData) have no file
-    // at all. Clamp to the accessible memory region so the bound is safe in both
-    // cases.
-    if (size_t region = AccessibleRegionSize(image_);
-        region != 0 && (image_size_ == 0 || region < image_size_)) {
-      image_size_ = region;
-    }
-    if (image_size_ == 0) {
+    // at all. Require a readable mapped region and clamp to it so the bound is
+    // always safe to read.
+    size_t region = AccessibleRegionSize(image_);
+    if (region == 0) {
       LogError("Cannot determine a bounded readable image range for fat binary input");
       return hipErrorInvalidImage;
+    }
+    if (image_size_ == 0 || region < image_size_) {
+      image_size_ = region;
     }
   } else {
     size_t fsize = 0;
