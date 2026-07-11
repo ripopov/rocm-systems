@@ -543,7 +543,7 @@ __device__ __forceinline__ void reduceCopyPacksWithBias(
           if (d == 0) {
             // Load the bias/accumulator pack here, at the point of use, rather
             // than up front.
-            BytePack<BytePerPack> b = ld_global<BytePerPack>(accPtr + u*WARP_SIZE*BytePerPack);
+            BytePack<BytePerPack> b = ld_volatile_global<BytePerPack>(accPtr + u*WARP_SIZE*BytePerPack);
             st_global<BytePerPack>(minDsts[d], applyReduce(redFn, acc[u], b));
           } else
             st_global<BytePerPack>(minDsts[d], acc[u]);
