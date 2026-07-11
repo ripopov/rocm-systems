@@ -98,7 +98,9 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL128, P2p, isNetOffload, Metadata,
         if (checkAbort(abort, 1, spins)) break;
       }
       if (sendConnFifo) {
-        sendConnFifo[sendStep[wid]%NCCL_STEPS].size = nbytes;
+        // Upstream NCCL uses index 0 here; do the same.
+        // This allows the whole Primitives struct to be registerized.
+        sendConnFifo[sendStep[0]%NCCL_STEPS].size = nbytes;
       }
       sendConnHead += 1;
     }

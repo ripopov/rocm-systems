@@ -18,64 +18,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-set(EXTRACT_TIMEOUT 5 CACHE STRING "Timeout in seconds for llvm-readobj and llvm-objcopy calls")
-
 ## List the objects for each gfx architecture
-execute_process( COMMAND llvm-readobj --offloading librccl.so
+execute_process( COMMAND $ROCM_PATH/llvm/bin/llvm-objdump --offloading librccl.so
     RESULT_VARIABLE list_result
     OUTPUT_VARIABLE cmd_output
     ERROR_VARIABLE cmd_error
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_STRIP_TRAILING_WHITESPACE
-    TIMEOUT ${EXTRACT_TIMEOUT}
-)
+    ERROR_STRIP_TRAILING_WHITESPACE)
 
-if(list_result EQUAL 0)
-    ## Convert cmd output to list of lines
-    string(REGEX REPLACE "\n$" "" cmd_output "${cmd_output}")
-    string(REPLACE "\n" ";" cmd_output "${cmd_output}")
-
-    ## Extract file paths for the selected gfx archs
-    foreach(line ${cmd_output})
-        if(line MATCHES "(gfx90a|gfx942|gfx950)")
-            string(REGEX MATCH "\\file://(.*)" file_match ${line})
-            if(file_match)
-                list(APPEND file_paths ${file_match})
-            endif()
-        endif()
-    endforeach()
-
-    ## Extract objects from files
-    foreach(file ${file_paths})
-        execute_process(
-          COMMAND llvm-objcopy --dump-offload-bundle=${file}
-          RESULT_VARIABLE extraction_result
-          ERROR_VARIABLE extraction_error
-          OUTPUT_STRIP_TRAILING_WHITESPACE
-          ERROR_STRIP_TRAILING_WHITESPACE
-          TIMEOUT ${EXTRACT_TIMEOUT}
-        )
-        if(extraction_result STREQUAL "TIMEOUT")
-          message(
-            WARNING
-              "[Timeout] Extraction of '${file}' did not finish within ${EXTRACT_TIMEOUT}s. stderr: ${extraction_error}.
-                    Timeouts have been known to happen as a result of mismatched ROCm versions/executables/etc."
-          )
-        elseif(NOT extraction_result EQUAL 0)
-          message(
-            WARNING
-              "[Error ${extraction_result}] Could not extract objects from '${file}'. stderr: ${extraction_error}"
-          )
-        endif()
-    endforeach()
-
-elseif(list_result STREQUAL "TIMEOUT")
-  message(
-    WARNING
-      "[Timeout] llvm-readobj/llvm-objcopy did not finish within ${EXTRACT_TIMEOUT}s. stderr: ${cmd_error}.
-                     Timeouts have been known to happen as a result of mismatched ROCm versions/executables/etc"
-  )
-else()
-    ## We don't want to stop building unit-tests if this command fails.
-    message(WARNING "[Error ${list_result}] llvm-readobj --offloading failed. stderr: ${cmd_error}")
-endif()

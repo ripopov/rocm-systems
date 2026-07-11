@@ -489,9 +489,7 @@ __device__ __forceinline__ void reduceCopyPacksWithBias(
       // Yes, for some template arguments this code will be unreachable.  That's fine.
       // coverity[dead_error_begin]
       // Fuse the load and reduce of each pack so only a single tmp pack is live
-      // at a time instead of tmp[Unroll]. Alongside acc[Unroll] the extra
-      // tmp[Unroll] array was inflating register pressure / private-segment
-      // (scratch) use on the useAcc reduce kernels.
+      // at a time instead of tmp[Unroll]. 
       #pragma unroll Unroll
       for (int u=0; u < Unroll; u++) {
         BytePack<BytePerPack> tmp;
@@ -544,11 +542,8 @@ __device__ __forceinline__ void reduceCopyPacksWithBias(
         } else {
           if (d == 0) {
             // Load the bias/accumulator pack here, at the point of use, rather
-            // than up front. Holding bias[Unroll] live across the whole reduce
-            // phase (alongside acc[] and tmp[]) is what drove the large private
-            // segment / spills on gfx950 for useAcc kernels. Loading per-pack
-            // keeps its live range to a single store fold.
-            BytePack<BytePerPack> b = ld_volatile_global<BytePerPack>(accPtr + u*WARP_SIZE*BytePerPack);
+            // than up front.
+            BytePack<BytePerPack> b = ld_global<BytePerPack>(accPtr + u*WARP_SIZE*BytePerPack);
             st_global<BytePerPack>(minDsts[d], applyReduce(redFn, acc[u], b));
           } else
             st_global<BytePerPack>(minDsts[d], acc[u]);
@@ -577,9 +572,7 @@ __device__ __forceinline__ void reduceCopyPacksWithBias(
     for (int d=0; d < MinDsts; d++) {
       minDsts[d] += (nWarps-1)*BytePerHunk;
     }
-    // accPtr is no longer advanced per-pack in the source loop (bias is now
-    // loaded via accPtr + u*WARP_SIZE*BytePerPack at the store), so advance by
-    // the full hunk here to stay in sync with minSrcs/minDsts.
+    // advance the full hunk here to stay in sync with minSrcs/minDsts.
     accPtr += nWarps*BytePerHunk;
     threadBytesBehind += nWarps*BytePerHunk;
     threadBytesAhead -= nWarps*BytePerHunk;

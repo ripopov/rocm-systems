@@ -167,20 +167,14 @@ inline __device__  fp8x2_storage_t hadd2_b(fp8x2_storage_t x, fp8x2_storage_t y)
 }
 
 // Packed 2-wide fp8 min/max. Mirrors hadd2: convert the fp8x2 pair up to f16x2
-// (lossless), do a single packed v_pk_{min,max}_f16, convert back. This keeps
-// MinMax reductions on fp8 in packed 16-bit storage instead of degrading to
-// per-element widen/compare/narrow (which drove the large private-segment/VGPR
-// use in the fp8 MinMax accumulator kernels on gfx950).
+// (lossless), do a single packed v_pk_{min,max}_f16, convert back.
 inline __device__  fp8x2_storage_t hminmax2(fp8x2_storage_t x, fp8x2_storage_t y, bool isMin)
 {
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
     half2_t vx = __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(x, 1.f, 0);
     half2_t vy = __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(y, 1.f, 0);
-    half2_t v1;
-    if (isMin)
-      asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
-    else
-      asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
+    half2_t v1 = isMin ? __builtin_elementwise_minnum(vx, vy)
+                       : __builtin_elementwise_maxnum(vx, vy);
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
@@ -205,11 +199,8 @@ inline __device__  fp8x2_storage_t hminmax2_b(fp8x2_storage_t x, fp8x2_storage_t
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
     half2_t vx = __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(x, 1.f, 0);
     half2_t vy = __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(y, 1.f, 0);
-    half2_t v1;
-    if (isMin)
-      asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
-    else
-      asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
+    half2_t v1 = isMin ? __builtin_elementwise_minnum(vx, vy)
+                       : __builtin_elementwise_maxnum(vx, vy);
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
@@ -230,13 +221,12 @@ inline __device__  fp8x2_storage_t hminmax2_b(fp8x2_storage_t x, fp8x2_storage_t
 }
 
 // Packed 2-wide fp8 multiply. Same shape as hadd2/hminmax2: convert up to
-// f16x2 (lossless), one packed v_pk_mul_f16, convert back. Avoids the
-// per-element widen/mul/narrow scalar recursion for fp8 Prod reductions.
+// f16x2 (lossless), one packed v_pk_mul_f16, convert back.
 inline __device__  fp8x2_storage_t hmul2(fp8x2_storage_t x, fp8x2_storage_t y)
 {
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
-    half2_t v1;
-    asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(v1) : "v"(__builtin_amdgcn_cvt_scalef32_pk_f16_fp8(x, 1.f, 0)), "v"(__builtin_amdgcn_cvt_scalef32_pk_f16_fp8(y, 1.f, 0)));
+    half2_t v1 = __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(x, 1.f, 0)
+               * __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(y, 1.f, 0);
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
@@ -259,8 +249,8 @@ inline __device__  fp8x2_storage_t hmul2(fp8x2_storage_t x, fp8x2_storage_t y)
 inline __device__  fp8x2_storage_t hmul2_b(fp8x2_storage_t x, fp8x2_storage_t y)
 {
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
-    half2_t v1;
-    asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(v1) : "v"(__builtin_amdgcn_cvt_scalef32_pk_f16_bf8(x, 1.f, 0)), "v"(__builtin_amdgcn_cvt_scalef32_pk_f16_bf8(y, 1.f, 0)));
+    half2_t v1 = __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(x, 1.f, 0)
+               * __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(y, 1.f, 0);
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
@@ -286,8 +276,7 @@ inline __device__  fp8x2_storage_t hpremul2(fp8x2_storage_t x, float s)
 {
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
     half2_t vs; vs[0] = (_Float16)s; vs[1] = (_Float16)s;
-    half2_t v1;
-    asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(v1) : "v"(__builtin_amdgcn_cvt_scalef32_pk_f16_fp8(x, 1.f, 0)), "v"(vs));
+    half2_t v1 = __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(x, 1.f, 0) * vs;
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
@@ -310,8 +299,7 @@ inline __device__  fp8x2_storage_t hpremul2_b(fp8x2_storage_t x, float s)
 {
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
     half2_t vs; vs[0] = (_Float16)s; vs[1] = (_Float16)s;
-    half2_t v1;
-    asm volatile("v_pk_mul_f16 %0, %1, %2" : "=v"(v1) : "v"(__builtin_amdgcn_cvt_scalef32_pk_f16_bf8(x, 1.f, 0)), "v"(vs));
+    half2_t v1 = __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(x, 1.f, 0) * vs;
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
