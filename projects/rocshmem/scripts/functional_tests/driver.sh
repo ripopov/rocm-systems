@@ -164,11 +164,8 @@ declare -A TEST_NUMBERS=(
   ["host_wait_until_any_status"]="147"
   ["host_wait_until_some_status"]="148"
   ["teamreducescatter"]="149"
-<<<<<<< HEAD
   ["broadcast_wave"]="150"
-=======
-  ["teamreducescatterwave"]="150"
->>>>>>> 89c8eb20ef (add reduce scatter wave)
+  ["teamreducescatterwave"]="151"
 )
 
 # Detect which runtime to use
