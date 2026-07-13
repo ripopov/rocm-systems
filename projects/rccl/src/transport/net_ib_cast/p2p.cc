@@ -383,8 +383,8 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
     if (!comm->useCtsOffload) {
       if (reqs[r] != NULL || ctsFifoTag(&slots[r]) != tag) continue;
 
-      int slotSize = ctsFifoSize(&slots[r]);
-      if (size > (size_t)slotSize) size = slotSize;
+      size_t slotSize = ctsFifoSize(&slots[r]);
+      if (size > slotSize) size = slotSize;
       // Sanity checks
       if (slotSize < 0 || ctsFifoAddr(&slots[r]) == 0 || ctsFifoRkey(&slots[r], 0) == 0) {
         char line[SOCKET_NAME_MAXLEN + 1];

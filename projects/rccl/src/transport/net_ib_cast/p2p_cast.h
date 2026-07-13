@@ -46,10 +46,10 @@ static inline uint64_t ctsFifoIdx(volatile struct ncclIbSendFifo* slot) {
     return ((volatile struct ncclIbSendFifoCtsInline*)slot)->idx;
   return slot->idx;
 }
-static inline int ctsFifoSize(volatile struct ncclIbSendFifo* slot) {
+static inline size_t ctsFifoSize(volatile struct ncclIbSendFifo* slot) {
   if (IbCastAinicRoce && IbCastUseInline)
-    return ((volatile struct ncclIbSendFifoCtsInline*)slot)->size;
-  return (int)slot->size;
+    return (size_t)((volatile struct ncclIbSendFifoCtsInline*)slot)->size;
+  return (size_t)slot->size;
 }
 static inline int ctsFifoTag(volatile struct ncclIbSendFifo* slot) {
   if (IbCastAinicRoce && IbCastUseInline)
