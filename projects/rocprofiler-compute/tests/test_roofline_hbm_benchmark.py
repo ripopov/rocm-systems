@@ -243,9 +243,7 @@ def test_load_bench_passes_hbm_source():
     mock_module = MagicMock()
     mock_module.Bench_gfx942 = mock_bench_class
 
-    with patch(
-        "utils.hip_interface.hipGetDeviceProperties", return_value=mock_props
-    ):
+    with patch("utils.hip_interface.hipGetDeviceProperties", return_value=mock_props):
         with patch("importlib.import_module", return_value=mock_module):
             _run_benchmark_mod.load_bench(0, {}, "transferbench")
 
