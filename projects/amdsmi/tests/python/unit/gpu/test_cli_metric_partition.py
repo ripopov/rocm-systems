@@ -221,12 +221,30 @@ def _build_args(**overrides):
 
 
 class TestCliMetricPartitionClock(unittest.TestCase):
+    # sys.modules keys that _install_fake_amdsmi() overwrites and must restore.
+    _FAKE_MODULE_KEYS = ("amdsmi", "amdsmi.amdsmi_interface", "amdsmi.amdsmi_exception")
+
     @classmethod
     def setUpClass(cls):
         if not os.path.isfile(METRIC_PATH):
             raise unittest.SkipTest(f"amd-smi CLI metric.py not found at {METRIC_PATH}")
+        # Snapshot the real modules so tearDownClass can undo the fake install.
+        # Otherwise the stub amdsmi leaks into later test modules (e.g. the real
+        # amdsmi_helpers imported by test_cli_exit_codes) and breaks them.
+        cls._saved_modules = {name: sys.modules.get(name) for name in cls._FAKE_MODULE_KEYS}
         cls.interface = _install_fake_amdsmi()
         cls.metric_module = _load_metric_module()
+
+    @classmethod
+    def tearDownClass(cls):
+        for name in cls._FAKE_MODULE_KEYS:
+            original = cls._saved_modules.get(name)
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+        # Drop the metric module that was loaded against the fake amdsmi.
+        sys.modules.pop("metric_under_test", None)
 
     def _run_clock_partition(self, partition_metrics):
         """Drive ``metric_gpu`` for ``--clock --partition`` and return ``clocks``."""
@@ -349,7 +367,3 @@ class TestCliMetricPartitionClock(unittest.TestCase):
         self.assertEqual(clocks["xcp_1"]["gfx_clk"], "1450 MHz")
         self.assertEqual(clocks["socclks_mid"]["mid_0"], "600 MHz")
         self.assertEqual(clocks["socclks_mid"]["mid_1"], "650 MHz")
-
-
-if __name__ == "__main__":
-    unittest.main()
