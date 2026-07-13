@@ -34,15 +34,20 @@ BENCHMARKING_SUPPORTED = [
 
 
 def run_roofline_benchmark(
-    device_id: int, roofline_csv: Path, cache_sizes: dict
+    device_id: int,
+    roofline_csv: Path,
+    cache_sizes: dict,
+    hbm_source: str = "builtin",
 ) -> None:
     """Load device benchmark, execute, and save results to CSV."""
-    bench = load_bench(device_id, cache_sizes)
+    bench = load_bench(device_id, cache_sizes, hbm_source)
     benchmark_metrics = bench.run_benchmark(device_id)
     bench.dump_csv(benchmark_metrics, str(roofline_csv))
 
 
-def load_bench(device_id: int, cache_sizes: dict) -> object:
+def load_bench(
+    device_id: int, cache_sizes: dict, hbm_source: str = "builtin"
+) -> object:
     try:
         from utils.hip_interface import hipGetDeviceProperties
 
@@ -65,7 +70,7 @@ def load_bench(device_id: int, cache_sizes: dict) -> object:
         # Get the bench class from the module
         bench_class = getattr(bench_module, f"Bench_{gfx_device}")
         # Instantiate and return the bench class
-        bench_instance = bench_class(device_id, cache_sizes)
+        bench_instance = bench_class(device_id, cache_sizes, hbm_source)
         return bench_instance
     except Exception as e:
         # Propagate error so users do not attempt to use a non-existent bench instance

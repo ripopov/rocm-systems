@@ -15,8 +15,10 @@ from .. import benchmark_base
 # Bench_gfx9 Class (ABSTRACT)
 # =============================================================================
 class Bench_gfx9(benchmark_base.Bench_base):
-    def __init__(self, device_id: int, cache_sizes: dict) -> None:
-        super().__init__(device_id, cache_sizes)
+    def __init__(
+        self, device_id: int, cache_sizes: dict, hbm_source: str = "builtin"
+    ) -> None:
+        super().__init__(device_id, cache_sizes, hbm_source)
 
         self.WAVEFRONT_SIZE = 64
         self.MATRIX_OPS_TYPE = "MFMA"
@@ -34,7 +36,7 @@ class Bench_gfx9(benchmark_base.Bench_base):
         }
 
         self.tests = {
-            "HBM": super().hbm_bw_benchmark,
+            "HBM": self._select_hbm_benchmark(),
             "MALL": super().mall_bw_bench,
             "L2": super().l2_bw_bench,
             "L1": super().l1_bw_bench,
@@ -83,6 +85,17 @@ class Bench_gfx9(benchmark_base.Bench_base):
     # Helper Methods and Classes
     # -----------------------------------------------------------------------------
 
+    def _select_hbm_benchmark(self) -> object:
+        """Return the HBM benchmark callable based on hbm_source setting."""
+        if self.hbm_source == "transferbench":
+            return super().hbm_bw_transferbench
+        if self.hbm_source == "auto":
+            import shutil
+
+            if shutil.which("TransferBench") is not None:
+                return super().hbm_bw_transferbench
+        return super().hbm_bw_benchmark
+
     # -----------------------------------------------------------------------------
     # Benchmarking kernel source
     # -----------------------------------------------------------------------------
@@ -97,12 +110,15 @@ class Bench_gfx9(benchmark_base.Bench_base):
 
         # HBM Bandwidth benchmark
         self.hbm_bw_src = """
-        template<typename T>
-        __global__ void HBM_bw(T *dst, const T *src)
+        extern "C" __global__ void HBM_bw(float4 *dst, const float4 *src,
+                                          unsigned int totalElements)
         {
             const unsigned int gid = blockDim.x * blockIdx.x + threadIdx.x;
-            const unsigned int tid = threadIdx.x;
-            dst[gid] = src[gid];
+            const unsigned int stride = gridDim.x * blockDim.x;
+            for (unsigned int i = gid; i < totalElements; i += stride)
+            {
+                dst[i] = src[i];
+            }
         }
         """
 

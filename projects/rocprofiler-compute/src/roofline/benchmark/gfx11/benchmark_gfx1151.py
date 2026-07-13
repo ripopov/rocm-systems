@@ -16,5 +16,7 @@ from . import benchmark_gfx11_base
 # Bench_gfx1151 Class
 # =============================================================================
 class Bench_gfx1151(benchmark_gfx11_base.Bench_gfx11):
-    def __init__(self, device_id: int, cache_sizes: dict) -> None:
-        super().__init__(device_id, cache_sizes)
+    def __init__(
+        self, device_id: int, cache_sizes: dict, hbm_source: str = "builtin"
+    ) -> None:
+        super().__init__(device_id, cache_sizes, hbm_source)

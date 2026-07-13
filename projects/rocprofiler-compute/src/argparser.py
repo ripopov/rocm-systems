@@ -550,6 +550,22 @@ Examples:
             " (Default: 0)"
         ),
     )
+    roofline_group.add_argument(
+        "--roof-hbm-source",
+        dest="roof_hbm_source",
+        metavar="",
+        required=False,
+        default="auto",
+        choices=["auto", "builtin", "transferbench"],
+        help=(
+            "\t\t\tHBM bandwidth benchmark source for roofline.\n"
+            "\t\t\t'auto': use TransferBench if available, else builtin"
+            " (Default).\n"
+            "\t\t\t'builtin': always use built-in HBM kernel.\n"
+            "\t\t\t'transferbench': require TransferBench"
+            " (error if not found)."
+        ),
+    )
 
     ## ----------------------------
     # Experimental Features

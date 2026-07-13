@@ -16,8 +16,10 @@ from . import benchmark_gfx9_base
 # Bench_gfx950 Class
 # =============================================================================
 class Bench_gfx950(benchmark_gfx9_base.Bench_gfx9):
-    def __init__(self, device_id: int, cache_sizes: dict) -> None:
-        super().__init__(device_id, cache_sizes)
+    def __init__(
+        self, device_id: int, cache_sizes: dict, hbm_source: str = "builtin"
+    ) -> None:
+        super().__init__(device_id, cache_sizes, hbm_source)
 
         self.unsupported_data_types = []
 

@@ -15,8 +15,10 @@ from .. import benchmark_base
 # Bench_gfx11 Class (ABSTRACT)
 # =============================================================================
 class Bench_gfx11(benchmark_base.Bench_base):
-    def __init__(self, device_id: int, cache_sizes: dict) -> None:
-        super().__init__(device_id, cache_sizes)
+    def __init__(
+        self, device_id: int, cache_sizes: dict, hbm_source: str = "builtin"
+    ) -> None:
+        super().__init__(device_id, cache_sizes, hbm_source)
 
         # TODO: there is potential wavefront size could be set to 64,
         # but default for gfx11 is 32
@@ -43,7 +45,7 @@ class Bench_gfx11(benchmark_base.Bench_base):
         self.matrix_ops = {}
 
         self.tests = {
-            "HBM": super().hbm_bw_benchmark,
+            "HBM": self._select_hbm_benchmark(),
             "MALL": super().mall_bw_bench,
             "L2": super().l2_bw_bench,
             "L1": super().l1_bw_bench,
@@ -93,6 +95,17 @@ class Bench_gfx11(benchmark_base.Bench_base):
     # -----------------------------------------------------------------------------
     # Helper Methods and Classes
     # -----------------------------------------------------------------------------
+
+    def _select_hbm_benchmark(self) -> object:
+        """Return the HBM benchmark callable based on hbm_source setting."""
+        if self.hbm_source == "transferbench":
+            return super().hbm_bw_transferbench
+        if self.hbm_source == "auto":
+            import shutil
+
+            if shutil.which("TransferBench") is not None:
+                return super().hbm_bw_transferbench
+        return super().hbm_bw_benchmark
 
     # -----------------------------------------------------------------------------
     # Benchmarking kernel source

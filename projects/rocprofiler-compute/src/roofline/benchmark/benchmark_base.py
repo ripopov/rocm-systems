@@ -10,6 +10,10 @@
 
 import csv
 import math
+import os
+import re
+import shutil
+import subprocess
 from abc import ABC
 from collections import namedtuple
 from collections.abc import Generator
@@ -57,8 +61,11 @@ VALU_NFMA = 1024
 # Bench_base Class (ABSTRACT)
 # =============================================================================
 class Bench_base(ABC):
-    def __init__(self, device_id: int, cache_sizes: dict) -> None:
+    def __init__(
+        self, device_id: int, cache_sizes: dict, hbm_source: str = "builtin"
+    ) -> None:
         self.device_id = device_id
+        self.hbm_source = hbm_source
 
         # Arch or hardware-specific variables must be set in child classes
         # self.lds_sizes: dict[str, int]
@@ -422,21 +429,32 @@ class Bench_base(ABC):
 
         cus = hip.hipGetDeviceProperties(device).multiProcessorCount
 
-        prog = self.Program(self.hbm_bw_src, ["HBM_bw<double>"])
-        func = prog.get_kernel("HBM_bw<double>")
+        prog = self.Program(self.hbm_bw_src)
+        func = prog.get_kernel("HBM_bw")
 
         workgroup_size = DEFAULT_WORKGROUP_SIZE
         workgroups_per_cu = 20 * 1024
         workgroups = cus * workgroups_per_cu
+        num_iters = 10
+
+        # Each thread processes one float4 (16 bytes) per iteration
+        float4_size = sizeof(c_float) * 4
         dataset_entries = workgroups * workgroup_size
+        total_elements = dataset_entries * num_iters
 
-        d_src = hip.hipMalloc(dataset_entries * sizeof(c_double))
-        d_dst = hip.hipMalloc(dataset_entries * sizeof(c_double))
+        d_src = hip.hipMalloc(total_elements * float4_size)
+        d_dst = hip.hipMalloc(total_elements * float4_size)
 
-        total_bytes = dataset_entries * sizeof(c_double) * 2
+        # Read + write
+        total_bytes = total_elements * float4_size * 2
 
         self.launch_kernel(
-            func, [workgroups, 1, 1], [workgroup_size, 1, 1], 0, None, [d_dst, d_src]
+            func,
+            [workgroups, 1, 1],
+            [workgroup_size, 1, 1],
+            0,
+            None,
+            [d_dst, d_src, total_elements],
         )
         hip.hipDeviceSynchronize()
 
@@ -448,7 +466,7 @@ class Bench_base(ABC):
             [workgroup_size, 1, 1],
             0,
             None,
-            [d_dst, d_src],
+            [d_dst, d_src, total_elements],
         )
 
         stats = self.calc_stats(samples)
@@ -470,6 +488,59 @@ class Bench_base(ABC):
         )
 
         return perf_metrics
+
+    # HBM bandwidth benchmark via TransferBench
+    def hbm_bw_transferbench(self, device: int) -> PerfMetrics:
+        """Measure HBM bandwidth using TransferBench if available."""
+        tb_path = shutil.which("TransferBench")
+        if tb_path is None:
+            raise FileNotFoundError(
+                "TransferBench not found on $PATH. "
+                "Install from https://github.com/ROCm/TransferBench "
+                "or use --roof-hbm-source builtin."
+            )
+
+        env = os.environ.copy()
+        env.update({
+            "HIP_VISIBLE_DEVICES": str(device),
+            "NUM_ITERATIONS": "10",
+            "NUM_WARMUPS": "3",
+            "HIDE_ENV": "1",
+        })
+
+        print(f"HBM BW (TransferBench hbm preset), GPU ID: {device}...")
+
+        result = subprocess.run(
+            [tb_path, "hbm"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"TransferBench failed (exit {result.returncode}):\n{result.stderr}"
+            )
+
+        # Parse bandwidth from TransferBench hbm output table.
+        # Format: │ Rank GPU │ MaxBw (GB/s)  AvgBw (GB/s)  MinBw (GB/s) │
+        # Data:   │    0   0 │     3997.25      3939.56      3763.29    │
+        # Extract all floating-point numbers from data rows (after the header).
+        bw_values = re.findall(r"(\d+\.\d+)", result.stdout)
+        if not bw_values:
+            raise RuntimeError(
+                f"Could not parse TransferBench output:\n{result.stdout[:500]}"
+            )
+
+        mean = max(float(v) for v in bw_values)
+
+        print(f"HBM BW (TransferBench), GPU ID: {device}, mean:{mean:.1f} GB/sec")
+
+        # TransferBench doesn't report confidence intervals per-iteration
+        # in default mode, so use 5% estimate
+        margin = mean * 0.05
+        return PerfMetrics(mean, mean - margin, mean + margin)
 
     # Generic cache bandwidth benchmark
     def cache_bw_bench(self, device: int, type: str, iters: int) -> PerfMetrics:
