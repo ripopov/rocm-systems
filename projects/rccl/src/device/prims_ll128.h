@@ -98,9 +98,16 @@ class Primitives<T, RedOp, Fan, Direct, ProtoLL128, P2p, isNetOffload, Metadata,
         if (checkAbort(abort, 1, spins)) break;
       }
       if (sendConnFifo) {
-        // Upstream NCCL uses index 0 here; do the same.
-        // This allows the whole Primitives struct to be registerized.
-        sendConnFifo[sendStep[0]%NCCL_STEPS].size = nbytes;
+        // Use the scalar sendConnHead instead of sendStep[wid]. This lane owns
+        // send connection `wid`, and sendConnHead is initialized to that
+        // connection's step (loadSendSync) and advanced once per waitSend, in
+        // lockstep with sendStep[wid], so the two are always equal here. Using
+        // the scalar avoids a dynamic (wid-indexed) load, which lets SROA
+        // scalarize sendStep and registerize the whole Primitives object,
+        // dropping structural scratch on the LL128 kernels. This matches the
+        // sibling LL primitive (prims_ll.h), which already indexes the FIFO
+        // with sendConnHead.
+        sendConnFifo[sendConnHead%NCCL_STEPS].size = nbytes;
       }
       sendConnHead += 1;
     }
