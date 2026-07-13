@@ -442,10 +442,13 @@ class Bench_base(ABC):
         dataset_entries = workgroups * workgroup_size
         total_elements = dataset_entries * num_iters
 
-        d_src = hip.hipMalloc(total_elements * float4_size)
-        d_dst = hip.hipMalloc(total_elements * float4_size)
+        # Buffer only needs dataset_entries elements; the kernel's stride loop
+        # re-visits the buffer num_iters times.
+        buffer_bytes = dataset_entries * float4_size
+        d_src = hip.hipMalloc(buffer_bytes)
+        d_dst = hip.hipMalloc(buffer_bytes)
 
-        # Read + write
+        # Read + write across all iterations
         total_bytes = total_elements * float4_size * 2
 
         self.launch_kernel(
