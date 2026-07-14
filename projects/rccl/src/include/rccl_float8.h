@@ -173,8 +173,16 @@ inline __device__  fp8x2_storage_t hminmax2(fp8x2_storage_t x, fp8x2_storage_t y
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
     half2_t vx = __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(x, 1.f, 0);
     half2_t vy = __builtin_amdgcn_cvt_scalef32_pk_f16_fp8(y, 1.f, 0);
+#if __has_builtin(__builtin_elementwise_minnum)
     half2_t v1 = isMin ? __builtin_elementwise_minnum(vx, vy)
                        : __builtin_elementwise_maxnum(vx, vy);
+#else
+    // Workaround for older compilers lacking __builtin_elementwise_{min,max}num
+    // (e.g. ROCm 7.0.2's clang): emit the packed min/max instruction directly.
+    half2_t v1;
+    if (isMin) asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
+    else       asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
+#endif
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
@@ -199,8 +207,16 @@ inline __device__  fp8x2_storage_t hminmax2_b(fp8x2_storage_t x, fp8x2_storage_t
 #if   __HIP_DEVICE_COMPILE__ && defined(__gfx950__)
     half2_t vx = __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(x, 1.f, 0);
     half2_t vy = __builtin_amdgcn_cvt_scalef32_pk_f16_bf8(y, 1.f, 0);
+#if __has_builtin(__builtin_elementwise_minnum)
     half2_t v1 = isMin ? __builtin_elementwise_minnum(vx, vy)
                        : __builtin_elementwise_maxnum(vx, vy);
+#else
+    // Workaround for older compilers lacking __builtin_elementwise_{min,max}num
+    // (e.g. ROCm 7.0.2's clang): emit the packed min/max instruction directly.
+    half2_t v1;
+    if (isMin) asm volatile("v_pk_min_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
+    else       asm volatile("v_pk_max_f16 %0, %1, %2" : "=v"(v1) : "v"(vx), "v"(vy));
+#endif
     union {
       shortx2_t i16_vec;
       fp8x2_storage_t fp8;
