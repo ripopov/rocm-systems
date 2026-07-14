@@ -15,16 +15,20 @@
 // 0 in the low byte, element 1 in the high byte) and, depending on the target,
 // take an architecture-specific path (gfx950 packed-f16, gfx942 packed-f32) or
 // a scalar per-element fallback. The invariant every path must satisfy is that
-// the 2-wide packed result equals the mathematically exact operation performed
-// in float and rounded back to fp8 (which is what the scalar fallback does).
+// the 2-wide packed result equals doing the same operation one element at a
+// time with the pre-existing per-element behavior.
 //
 // Oracle strategy: the fp8 encoding differs between the host (OCP e4m3/e5m2)
-// and the gfx942 device (fnuz). A host-side reference would therefore not match
-// the device result. Instead the oracle is computed *on the device*, using the
-// same fp8 type as the packed helper: decode each lane to float, apply the op in
-// float, and round back to fp8. Only decoded float values cross back to the host
-// for comparison, so the test is correct on gfx90a (fallback), gfx942 (fnuz) and
-// gfx950 (packed) alike.
+// and the gfx942 device (fnuz), so a host-side reference would not match the
+// device result. The oracle is computed *on the device* with the same fp8 type
+// as the helper, and it mirrors the *existing* per-element semantics rather
+// than an idealized model:
+//   - Add:    the scalar hadd/hadd_b - on gfx942 these overflow to NaN via the
+//             raw cvt (no downcast clipping), so the packed hadd2 must too.
+//   - Min/Max/Mul/PreMul: the saturating rccl_float8/rccl_bfloat8 path (downcast
+//             clipping to +/-240 / +/-57344), so the packed helpers must saturate.
+// Only decoded float values cross back to the host for comparison, so the test
+// is valid on gfx90a (fallback), gfx942 (fnuz) and gfx950 (packed) alike.
 
 #include "DeviceTestBase.hpp"
 
@@ -50,6 +54,7 @@ template<> struct Fp8Traits<false> {
   static __device__ fp8x2_storage_t minmax(fp8x2_storage_t x, fp8x2_storage_t y, bool mn) { return hminmax2(x, y, mn); }
   static __device__ fp8x2_storage_t mul(fp8x2_storage_t x, fp8x2_storage_t y)             { return hmul2(x, y); }
   static __device__ fp8x2_storage_t premul(fp8x2_storage_t x, float s)                    { return hpremul2(x, s); }
+  static __device__ elem_t          scalarAdd(elem_t a, elem_t b)                         { return hadd(a, b); }
 };
 
 template<> struct Fp8Traits<true> {
@@ -58,6 +63,7 @@ template<> struct Fp8Traits<true> {
   static __device__ fp8x2_storage_t minmax(fp8x2_storage_t x, fp8x2_storage_t y, bool mn) { return hminmax2_b(x, y, mn); }
   static __device__ fp8x2_storage_t mul(fp8x2_storage_t x, fp8x2_storage_t y)             { return hmul2_b(x, y); }
   static __device__ fp8x2_storage_t premul(fp8x2_storage_t x, float s)                    { return hpremul2_b(x, s); }
+  static __device__ elem_t          scalarAdd(elem_t a, elem_t b)                         { return hadd_b(a, b); }
 };
 
 // Decode a packed fp8x2 into its two lanes as floats.
@@ -105,20 +111,35 @@ __global__ void kFp8Reduce(const fp8x2_storage_t* __restrict__ X,
   float p0, p1;
   decode2<IsBf8>(packed, p0, p1);
 
-  // ---- independent float oracle ----
-  float x0, x1, y0, y1;
-  decode2<IsBf8>(x, x0, x1);
-  decode2<IsBf8>(y, y0, y1);
-  float r0, r1;
-  switch (op) {
-    case OP_ADD:    r0 = x0 + y0;               r1 = x1 + y1;               break;
-    case OP_MIN:    r0 = fminf(x0, y0);         r1 = fminf(x1, y1);         break;
-    case OP_MAX:    r0 = fmaxf(x0, y0);         r1 = fmaxf(x1, y1);         break;
-    case OP_MUL:    r0 = x0 * y0;               r1 = x1 * y1;               break;
-    default:        r0 = x0 * scalar;           r1 = x1 * scalar;           break;
+  // ---- reference: apply the pre-existing per-element behavior ----
+  // Add: reduce previously summed with the scalar hadd, whose gfx942 path
+  // overflows to NaN (no downcast clipping) - so the reference must too.
+  // Min/Max/Mul/PreMul: reduce previously went through the saturating
+  // rccl_float8/rccl_bfloat8 path, so the reference saturates.
+  fp8x2_storage_t refPacked;
+  if (op == OP_ADD) {
+    using elem_t = typename Fp8Traits<IsBf8>::elem_t;
+    union { elem_t e[2]; fp8x2_storage_t s; } ux, uy, uw;
+    ux.s = x;
+    uy.s = y;
+    uw.e[0] = Fp8Traits<IsBf8>::scalarAdd(ux.e[0], uy.e[0]);
+    uw.e[1] = Fp8Traits<IsBf8>::scalarAdd(ux.e[1], uy.e[1]);
+    refPacked = uw.s;
+  } else {
+    float x0, x1, y0, y1;
+    decode2<IsBf8>(x, x0, x1);
+    decode2<IsBf8>(y, y0, y1);
+    float r0, r1;
+    switch (op) {
+      case OP_MIN:    r0 = fminf(x0, y0);         r1 = fminf(x1, y1);         break;
+      case OP_MAX:    r0 = fmaxf(x0, y0);         r1 = fmaxf(x1, y1);         break;
+      case OP_MUL:    r0 = x0 * y0;               r1 = x1 * y1;               break;
+      default:        r0 = x0 * scalar;           r1 = x1 * scalar;           break;
+    }
+    refPacked = encode2<IsBf8>(r0, r1);
   }
   float ref0, ref1;
-  decode2<IsBf8>(encode2<IsBf8>(r0, r1), ref0, ref1);
+  decode2<IsBf8>(refPacked, ref0, ref1);
 
   packedOut[2 * i]     = p0;
   packedOut[2 * i + 1] = p1;
