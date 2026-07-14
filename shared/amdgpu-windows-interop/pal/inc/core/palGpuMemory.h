@@ -344,6 +344,23 @@ struct PinnedGpuMemoryCreateInfo
     GpuMemMallRange   mallRange;  ///< These parameters are only meaningful if flags.mallRangeActive
                                   ///  is set.  Any pages outside of this range will use the opposite
                                   ///  MALL policy from what is specified in "mallPolicy".
+    union
+    {
+        struct
+        {
+#if PAL_DGMA_SUPPORT
+            uint32 hostMappedForeign : 1; ///< Indicates pSysMem is a host-mapped pointer to physical memory residing
+                                          ///  on an external device
+#else
+            uint32 reserved0 : 1; ///< Reserved for future use.
+#endif
+            uint32 gl2Uncached : 1; ///< Specifies the GPU Memory is un-cached on GPU L2 cache.
+                                    ///  But the memory still would be cached by other cache hierarchy
+                                    ///  like L0, RB caches, L1, and L3.
+            uint32 reserved : 30;   ///< Reserved for future use.
+        };
+        uint32 u32All; ///< Flags packed as 32-bit uint.
+    } flags;           ///< Pinned Gpu memory create info flags.
 };
 
 /// Specifies properties for @ref IGpuMemory creation.  Input structure to IDevice::CreateSvmGpuMemory().

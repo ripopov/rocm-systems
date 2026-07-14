@@ -862,7 +862,7 @@ HIP_TEST_CASE(Unit_hipHostRegister_Capture) {
  * ------------------------
  *    - HIP_VERSION >= 5.2
  */
-HIP_TEST_CASE(Unit_hipHostRegister_with_hipExtHostRegisterCoarseGrained) {
+HIP_TEST_CASE(Unit_hipHostRegister_with_coarse_grain) {
 #if HT_AMD
   const size_t count = 65536;
   const size_t threadsPerBlock = 64;
@@ -878,7 +878,8 @@ HIP_TEST_CASE(Unit_hipHostRegister_with_hipExtHostRegisterCoarseGrained) {
   HIP_CHECK(hipHostUnregister(hostPtr));
   std::cout << "hostPtr=" << hostPtr << ", devicePtr=" << devicePtr << std::endl;
   if (*hostPtr == static_cast<float>(count)) {
-    std::cout << "__builtin_amdgcn_global_atomic_fadd_f32 works well!" << std::endl;
+    std::cout << "__builtin_amdgcn_global_atomic_fadd_f32 works well on coarse grain!"
+              << std::endl;
     REQUIRE(true);
   } else if (*hostPtr == -1.0f) {
     std::cout << "__builtin_amdgcn_global_atomic_fadd_f32 not supported!" << std::endl;
@@ -891,6 +892,48 @@ HIP_TEST_CASE(Unit_hipHostRegister_with_hipExtHostRegisterCoarseGrained) {
 #endif
 }
 
+/**
+ * Test Description
+ * ------------------------
+ *    - This testcase verifies hipHostRegisterDefault flags of hipHostRegister.
+ *    - In this case L2 cache disabled on device, the atomic test will fail because
+ *    - it can only work on coarse grain.
+ * Test source
+ * ------------------------
+ *    - catch\unit\memory\hipHostRegister.cc
+ * Test requirements
+ * ------------------------
+ *    - HIP_VERSION >= 5.2
+ */
+HIP_TEST_CASE(Unit_hipHostRegister_with_fine_grain) {
+#if HT_AMD
+  const size_t count = 65536;
+  const size_t threadsPerBlock = 64;
+  size_t sizeBytes = sizeof(float);
+  float* hostPtr = reinterpret_cast<float*>(malloc(sizeBytes));
+  float* devicePtr = nullptr;
+  *hostPtr = 0;
+  HIP_CHECK(hipHostRegister(hostPtr, sizeBytes, hipHostRegisterDefault));
+  HIP_CHECK(hipHostGetDevicePointer(reinterpret_cast<void**>(&devicePtr), hostPtr, 0));
+  AtomicFAddKernelKernel<<<(count + threadsPerBlock - 1) / threadsPerBlock, threadsPerBlock>>>(
+      devicePtr, count);
+  HIP_CHECK(hipDeviceSynchronize());
+  HIP_CHECK(hipHostUnregister(hostPtr));
+  std::cout << "hostPtr=" << hostPtr << ", devicePtr=" << devicePtr << std::endl;
+  if (*hostPtr == static_cast<float>(count)) {
+    std::cout << "__builtin_amdgcn_global_atomic_fadd_f32 should not work on fine grain!"
+              << std::endl;
+    REQUIRE(false);
+  } else if (*hostPtr == -1.0f) {
+    std::cout << "__builtin_amdgcn_global_atomic_fadd_f32 not supported!" << std::endl;
+    REQUIRE(true);
+  } else {
+    std::cout << count << " -> " << *hostPtr << std::endl;
+    REQUIRE(true);
+  }
+  free(hostPtr);
+#endif
+}
 /**
  * End doxygen group MemoryTest.
  * @}
