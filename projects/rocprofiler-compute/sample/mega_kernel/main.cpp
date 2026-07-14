@@ -385,7 +385,16 @@ main(int argc, char** argv)
         HIP_CHECK(hipMalloc(&d_surf_buffer, BUFFER_SIZE * sizeof(float)));
         HIP_CHECK(hipMemset(d_surf_buffer, 0, BUFFER_SIZE * sizeof(float)));
         resDesc.res.linear.devPtr = d_surf_buffer;
-        HIP_CHECK(hipCreateSurfaceObject(&surf_obj, &resDesc));
+        hipError_t surf_err       = hipCreateSurfaceObject(&surf_obj, &resDesc);
+        if(surf_err != hipSuccess)
+        {
+            fprintf(stderr,
+                    "Warning: hipCreateSurfaceObject failed (%s), skipping TEX store "
+                    "tests\n",
+                    hipGetErrorString(surf_err));
+            surf_obj = 0;
+            (void) hipGetLastError();
+        }
     }
 
     printf("Running GPU Mega Kernel for %s...\n",
