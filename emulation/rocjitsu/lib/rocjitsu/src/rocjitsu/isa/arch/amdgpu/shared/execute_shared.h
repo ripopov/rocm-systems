@@ -950,7 +950,6 @@ inline void execute_s_cls_i32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]]
     return static_cast<uint32_t>(std::countl_zero(u)) - 1u;
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -964,7 +963,6 @@ inline void execute_s_cls_i32_i64_sop1([[maybe_unused]] Inst &inst,
     return static_cast<uint32_t>(std::countl_zero(u)) - 1u;
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0LL));
 }
 
 template <typename Inst>
@@ -975,7 +973,6 @@ inline void execute_s_clz_i32_u32_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countl_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -986,7 +983,6 @@ inline void execute_s_clz_i32_u64_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countl_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -1409,7 +1405,6 @@ inline void execute_s_ctz_i32_b32_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countr_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -1420,7 +1415,6 @@ inline void execute_s_ctz_i32_b64_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countr_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -1528,7 +1522,6 @@ inline void execute_s_ff0_i32_b32_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countr_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -1539,7 +1532,6 @@ inline void execute_s_ff0_i32_b64_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countr_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -1550,7 +1542,6 @@ inline void execute_s_ff1_i32_b32_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countr_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -1561,7 +1552,6 @@ inline void execute_s_ff1_i32_b64_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countr_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -1573,7 +1563,6 @@ inline void execute_s_flbit_i32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused
                         : static_cast<uint32_t>(std::countl_zero(abs_val));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -1584,7 +1573,6 @@ inline void execute_s_flbit_i32_b32_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countl_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -1595,7 +1583,6 @@ inline void execute_s_flbit_i32_b64_sop1([[maybe_unused]] Inst &inst,
     return s == 0 ? static_cast<uint32_t>(-1) : static_cast<uint32_t>(std::countl_zero(s));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -1608,7 +1595,6 @@ inline void execute_s_flbit_i32_i64_sop1([[maybe_unused]] Inst &inst,
                         : static_cast<uint32_t>(std::countl_zero(abs_val));
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0LL));
 }
 
 template <typename Inst>
