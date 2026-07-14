@@ -7,6 +7,7 @@
 #include "hip/hip_runtime_api.h"
 #include "hip_fatbin.hpp"
 #include "hip_global.hpp"
+#include <algorithm>
 #include <unordered_map>
 #include <mutex>
 #include <limits>
@@ -197,10 +198,10 @@ static std::string TargetToGeneric(const std::string &input) {
   return generic_name;
 }
 
-// image_size bounds the fixed-size magic/header probes below (0 == unknown).
+// image_size bounds the fixed-size magic/header probes below.
 static bool IsCodeObjectUncompressed(const void* image, size_t image_size) {
   constexpr size_t magic_len = sizeof(symbols::kOffloadBundleUncompressedMagicStr) - 1;
-  if (image_size != 0 && image_size < magic_len) {
+  if (image_size < magic_len) {
     return false;
   }
   return std::memcmp(image,
@@ -210,7 +211,7 @@ static bool IsCodeObjectUncompressed(const void* image, size_t image_size) {
 
 static bool IsCodeObjectCompressed(const void* image, size_t image_size) {
   constexpr size_t magic_len = sizeof(symbols::kOffloadBundleCompressedMagicStr) - 1;
-  if (image_size != 0 && image_size < magic_len) {
+  if (image_size < magic_len) {
     return false;
   }
   return std::memcmp(image,
@@ -218,148 +219,15 @@ static bool IsCodeObjectCompressed(const void* image, size_t image_size) {
                      magic_len) == 0;
 }
 
-static bool CheckedElfRange(uint64_t offset, uint64_t size, size_t image_size, size_t* end) {
-  if (offset > image_size) {
+static bool IsCodeObjectElf(const void* image, size_t image_size) {
+  if (image_size < sizeof(amd::Elf64_Ehdr)) {
     return false;
   }
-  const size_t checked_offset = static_cast<size_t>(offset);
-  if (size > image_size - checked_offset) {
-    return false;
-  }
-  *end = checked_offset + static_cast<size_t>(size);
-  return true;
-}
-
-static bool CheckedElfTableRange(uint64_t offset, uint64_t count, size_t entry_size,
-                                 size_t image_size, size_t* end) {
-  if (offset == 0 || offset > image_size || entry_size == 0) {
-    return false;
-  }
-  const size_t checked_offset = static_cast<size_t>(offset);
-  const size_t available = image_size - checked_offset;
-  if (count > available / entry_size) {
-    return false;
-  }
-  *end = checked_offset + static_cast<size_t>(count) * entry_size;
-  return true;
-}
-
-// Validate every file-backed ELF range against image_size and return the exact
-// byte extent needed by the downstream ELF reader.
-template <typename Ehdr, typename Phdr, typename Shdr>
-static bool GetBoundedElfImageSizeForClass(const void* image, size_t image_size, size_t* elf_size) {
-  if (image_size < sizeof(Ehdr)) {
-    return false;
-  }
-
-  Ehdr ehdr = {};
+  amd::Elf64_Ehdr ehdr = {};
   std::memcpy(&ehdr, image, sizeof(ehdr));
-  if (ehdr.e_machine != EM_AMDGPU || ehdr.e_ident[EI_OSABI] != ELFOSABI_AMDGPU_HSA ||
-      ehdr.e_ehsize < sizeof(Ehdr)) {
-    return false;
-  }
-
-  size_t extent = 0;
-  if (!CheckedElfRange(0, ehdr.e_ehsize, image_size, &extent)) {
-    return false;
-  }
-
-  // Extended header counts require section-header-zero decoding. AMDGPU code
-  // objects do not use them, so reject them instead of accepting an ambiguous
-  // or attacker-controlled table size.
-  constexpr uint16_t kExtendedProgramHeaderCount = 0xffff;
-  if (ehdr.e_phnum == kExtendedProgramHeaderCount ||
-      (ehdr.e_shnum == 0 && ehdr.e_shoff != 0)) {
-    return false;
-  }
-
-  if (ehdr.e_phnum != 0) {
-    if (ehdr.e_phentsize < sizeof(Phdr)) {
-      return false;
-    }
-    size_t table_end = 0;
-    if (!CheckedElfTableRange(ehdr.e_phoff, ehdr.e_phnum, ehdr.e_phentsize, image_size,
-                              &table_end)) {
-      return false;
-    }
-    if (table_end > extent) {
-      extent = table_end;
-    }
-
-    const auto* bytes = static_cast<const char*>(image);
-    for (uint64_t i = 0; i < ehdr.e_phnum; ++i) {
-      Phdr phdr = {};
-      const size_t offset = static_cast<size_t>(ehdr.e_phoff) +
-                            static_cast<size_t>(i) * ehdr.e_phentsize;
-      std::memcpy(&phdr, bytes + offset, sizeof(phdr));
-      if (phdr.p_filesz == 0) {
-        continue;
-      }
-      size_t segment_end = 0;
-      if (!CheckedElfRange(phdr.p_offset, phdr.p_filesz, image_size, &segment_end)) {
-        return false;
-      }
-      if (segment_end > extent) {
-        extent = segment_end;
-      }
-    }
-  }
-
-  if (ehdr.e_shnum != 0) {
-    if (ehdr.e_shentsize < sizeof(Shdr)) {
-      return false;
-    }
-    size_t table_end = 0;
-    if (!CheckedElfTableRange(ehdr.e_shoff, ehdr.e_shnum, ehdr.e_shentsize, image_size,
-                              &table_end)) {
-      return false;
-    }
-    if (table_end > extent) {
-      extent = table_end;
-    }
-
-    const auto* bytes = static_cast<const char*>(image);
-    for (uint64_t i = 0; i < ehdr.e_shnum; ++i) {
-      Shdr shdr = {};
-      const size_t offset = static_cast<size_t>(ehdr.e_shoff) +
-                            static_cast<size_t>(i) * ehdr.e_shentsize;
-      std::memcpy(&shdr, bytes + offset, sizeof(shdr));
-      if (shdr.sh_type == SHT_NOBITS || shdr.sh_size == 0) {
-        continue;
-      }
-      size_t section_end = 0;
-      if (!CheckedElfRange(shdr.sh_offset, shdr.sh_size, image_size, &section_end)) {
-        return false;
-      }
-      if (section_end > extent) {
-        extent = section_end;
-      }
-    }
-  }
-
-  *elf_size = extent;
-  return true;
-}
-
-static bool GetBoundedElfImageSize(const void* image, size_t image_size, size_t* elf_size) {
-  if (image_size < EI_NIDENT) {
-    return false;
-  }
-  const auto* ident = static_cast<const unsigned char*>(image);
-  if (ident[EI_MAG0] != ELFMAG0 || ident[EI_MAG1] != ELFMAG1 || ident[EI_MAG2] != ELFMAG2 ||
-      ident[EI_MAG3] != ELFMAG3 || ident[EI_DATA] != ELFDATA2LSB) {
-    return false;
-  }
-
-  if (ident[EI_CLASS] == ELFCLASS32) {
-    return GetBoundedElfImageSizeForClass<amd::Elf32_Ehdr, amd::Elf32_Phdr, amd::Elf32_Shdr>(
-        image, image_size, elf_size);
-  }
-  if (ident[EI_CLASS] == ELFCLASS64) {
-    return GetBoundedElfImageSizeForClass<amd::Elf64_Ehdr, amd::Elf64_Phdr, amd::Elf64_Shdr>(
-        image, image_size, elf_size);
-  }
-  return false;
+  return ehdr.e_ident[EI_MAG0] == ELFMAG0 && ehdr.e_ident[EI_MAG1] == ELFMAG1 &&
+         ehdr.e_ident[EI_MAG2] == ELFMAG2 && ehdr.e_ident[EI_MAG3] == ELFMAG3 &&
+         ehdr.e_machine == EM_AMDGPU && ehdr.e_ident[EI_OSABI] == ELFOSABI_AMDGPU_HSA;
 }
 
 static bool UncompressAndPopulateCodeObject(
@@ -382,7 +250,7 @@ static bool UncompressAndPopulateCodeObject(
   }
 
   // totalSize/header are attacker-controlled; reject if they exceed the image.
-  if (image_size != 0 && image_size < sizeof(symbols::ClangOffloadBundleCompressedHeader)) {
+  if (image_size < sizeof(symbols::ClangOffloadBundleCompressedHeader)) {
     LogError("Compressed fat binary header is truncated");
     return false;
   }
@@ -390,7 +258,7 @@ static bool UncompressAndPopulateCodeObject(
   const auto obheader = reinterpret_cast<const symbols::ClangOffloadBundleCompressedHeader*>(image);
   const size_t size = obheader->totalSize;
 
-  if (image_size != 0 && size > image_size) {
+  if (size > image_size) {
     LogPrintfError("Rejecting compressed fat binary: totalSize=%llu exceeds image bound %llu",
                    static_cast<unsigned long long>(size),
                    static_cast<unsigned long long>(image_size));
@@ -529,10 +397,7 @@ static bool PopulateCodeObjectMap(
     }
 
     // Clamp the header lookup window to the image so comgr can't over-read it.
-    size_t header_window = 4096;
-    if (image_size != 0 && image_size < header_window) {
-      header_window = image_size;
-    }
+    const size_t header_window = std::min<size_t>(4096, image_size);
     if (auto comgr_status = amd::Comgr::set_data(data_object.get(), header_window,
                                                  reinterpret_cast<const char*>(image));
         comgr_status != AMD_COMGR_STATUS_SUCCESS) {
@@ -563,24 +428,13 @@ static bool PopulateCodeObjectMap(
       if (item.size > 0) {
         // offset/size come from the attacker-controlled bundle header; reject
         // anything that would point outside the image.
-        if (image_size != 0) {
-          if (item.offset > image_size || item.size > image_size - item.offset) {
-            LogPrintfError(
-                "Rejecting fat binary: code object for isa '%s' is out of bounds "
-                "(offset=%llu size=%llu image bound=%llu)",
-                item.isa, static_cast<unsigned long long>(item.offset),
-                static_cast<unsigned long long>(item.size),
-                static_cast<unsigned long long>(image_size));
-            bounds_ok = false;
-            break;
-          }
-        } else if (item.offset > std::numeric_limits<size_t>::max() - item.size) {
-          // Unknown image size: at least reject pointer-arithmetic overflow.
+        if (item.offset > image_size || item.size > image_size - item.offset) {
           LogPrintfError(
-              "Rejecting fat binary: code object for isa '%s' offset/size overflow "
-              "(offset=%llu size=%llu)",
+              "Rejecting fat binary: code object for isa '%s' is out of bounds "
+              "(offset=%llu size=%llu image bound=%llu)",
               item.isa, static_cast<unsigned long long>(item.offset),
-              static_cast<unsigned long long>(item.size));
+              static_cast<unsigned long long>(item.size),
+              static_cast<unsigned long long>(image_size));
           bounds_ok = false;
           break;
         }
@@ -673,11 +527,15 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
   });
 
   if (image_ != nullptr) {
-    if (!amd::Os::FindFileNameFromAddress(image_, &fname_, &foffset_)) {
+    const bool has_backing_file = amd::Os::FindFileNameFromAddress(image_, &fname_, &foffset_);
+    if (!has_backing_file) {
       fname_ = std::string("");
       foffset_ = 0;
-    } else {
-      // File-backed image (e.g. a loaded .so/.dll): bound by the backing file.
+    }
+#if defined(__linux__)
+    if (has_backing_file) {
+      // On Linux, FindFileNameFromAddress returns an actual file offset. On
+      // Windows it returns an RVA, which cannot be subtracted from file size.
       amd::Os::FileDesc src_fdesc = amd::Os::FDescInit();
       size_t src_fsize = 0;
       if (amd::Os::GetFileHandle(fname_.c_str(), &src_fdesc, &src_fsize)) {
@@ -687,10 +545,10 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
         amd::Os::CloseFileHandle(src_fdesc);
       }
     }
-    // The file size counts the whole file, not the bytes actually mapped at
-    // image_, and non-file-backed pointers (raw hipModuleLoadData) have no file
-    // at all. Require a readable mapped region and clamp to it so the bound is
-    // always safe to read.
+#endif
+    // hipModuleLoadData has no length parameter, so the VM region is only a
+    // maximum readable bound, not the exact caller-owned object size. Clamp a
+    // Linux file bound to it and fail closed if no readable bound is available.
     size_t region = AccessibleRegionSize(image_);
     if (region == 0) {
       LogError("Cannot determine a bounded readable image range for fat binary input");
@@ -722,10 +580,11 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
 
   // It better be elf if its neither compressed nor uncompressed
   if (!is_compressed && !is_uncompressed) {
-    size_t elf_size = 0;
-    if (GetBoundedElfImageSize(image_, image_size_, &elf_size)) {
+    if (IsCodeObjectElf(image_, image_size_)) {
+      // Avoid the unbounded getElfSize() walk. The downstream ELF reader also
+      // receives this readable upper bound instead of an inferred size.
       for (auto* device : devices) {
-        if (hipSuccess != AddDevProgram(device, image_, elf_size, fdesc))
+        if (hipSuccess != AddDevProgram(device, image_, image_size_, fdesc))
           return hipErrorInvalidImage;
       }
       return hipSuccess;  // We are done since it was already ELF

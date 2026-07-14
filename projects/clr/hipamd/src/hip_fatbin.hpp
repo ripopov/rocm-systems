@@ -73,7 +73,7 @@ class FatBinaryInfo {
   // When loaded from a file, image_ is the mmap address; fd is closed once
   // ExtractFatBinaryUsingCOMGR has dup'd it for every per-device handoff.
   const void* image_;  //!< Image
-  size_t image_size_;  //!< Mapped image size (only valid when image_mapped_ is true)
+  size_t image_size_;  //!< Readable image bound; exact mapped size when image_mapped_ is true
   bool image_mapped_;  //!< flag to detect if image is mapped
 
   // Only used for FBs where image is directly passed
