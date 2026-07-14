@@ -42,8 +42,13 @@ fi
 git fetch origin "${BRANCH}"
 git checkout "${BRANCH}"
 git pull --ff-only origin "${BRANCH}" || true
-git submodule update --init --recursive projects/rocprofiler-compute/src || \
-  git submodule update --init --recursive
+# rocprofiler-compute depends on fmt/googletest/json/pyyaml submodules under src/
+git submodule update --init --recursive \
+  projects/rocprofiler-compute/src/lib/external/fmt \
+  projects/rocprofiler-compute/src/lib/external/googletest \
+  projects/rocprofiler-compute/src/lib/external/json \
+  projects/rocprofiler-compute/src/vendored/pyyaml || \
+  git submodule update --init --recursive projects/rocprofiler-compute/src
 COMMIT="$(git -C projects/rocprofiler-compute rev-parse --short HEAD 2>/dev/null || git rev-parse --short HEAD)"
 echo "Checked out commit: ${COMMIT}"
 echo "${COMMIT}" > "${LOG_DIR}/git_commit.txt"
@@ -151,8 +156,20 @@ echo "Inside container: $(hostname)"
 echo "ROCM_PATH=${ROCM_PATH}"
 /rocm-venv/bin/rocminfo 2>/dev/null | head -20 || true
 
-git submodule update --init --recursive src/ || true
+cd /app
+git submodule update --init --recursive \
+  projects/rocprofiler-compute/src/lib/external/fmt \
+  projects/rocprofiler-compute/src/lib/external/googletest \
+  projects/rocprofiler-compute/src/lib/external/json \
+  projects/rocprofiler-compute/src/vendored/pyyaml || \
+  git submodule update --init --recursive projects/rocprofiler-compute/src || true
+
+cd /app/projects/rocprofiler-compute
 /rocm-venv/bin/pip install -q -r requirements.txt -r requirements-test.txt
+
+# hash_checker.py moved to tools/config_management/ in #8166; stale .coverage
+# still references src/utils/hash_checker.py and breaks generate_coverage_report.
+rm -f .coverage tests/coverage.info
 
 rm -rf build install
 cmake -B build \
@@ -163,6 +180,19 @@ cmake -B build \
   -D PYTEST_NUMPROCS="$(nproc)" \
   -S .
 cmake --build build --target install --parallel "$(nproc)" 2>&1 | tee /reports/cmake_build.log
+
+# NativeToolFinder searches /app/projects/lib*/rocprofiler-compute/ for the
+# installed .so. Symlink install output there so profile tests skip JIT builds
+# (parallel CTest otherwise races on src/lib/_build).
+mkdir -p /app/projects/lib/rocprofiler-compute
+ln -sf "$(pwd)/install/lib/rocprofiler-compute/librocprofiler-compute-tool.so" \
+  /app/projects/lib/rocprofiler-compute/librocprofiler-compute-tool.so
+
+# Belt-and-suspenders: pre-build the JIT native-tool tree once before CTest.
+rm -rf src/lib/_build
+cmake -S src/lib -B src/lib/_build
+cmake --build src/lib/_build --parallel "$(nproc)"
+test -f src/lib/_build/lib/librocprofiler-compute-tool.so
 
 cd build
 echo "=== CTest: full suite ===" | tee /reports/ctest_full.log
