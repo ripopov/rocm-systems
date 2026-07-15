@@ -238,7 +238,7 @@ experiment::start()
 
     LOG_INFO("Starting causal experiment #{}: {}", index, as_string());
 
-    if(get_state() < State::Finalized)
+    if(process_state::get() < process_state::State::Finalized)
     {
         current_experiment_value = *this;
         current_selected_count.store(0);
@@ -255,7 +255,7 @@ experiment::wait() const
     auto _wait = experiment_time - (_now - start_time);
     auto _end  = _now + _wait;
     auto _incr = std::min<std::uint64_t>(_wait / 100, 1000000);
-    while(tracing::now() < _end && get_state() < State::Finalized)
+    while(tracing::now() < _end && process_state::get() < process_state::State::Finalized)
     {
         std::this_thread::yield();
         std::this_thread::sleep_for(std::chrono::nanoseconds{ _incr });

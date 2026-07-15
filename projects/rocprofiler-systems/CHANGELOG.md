@@ -26,6 +26,14 @@ Full documentation for ROCm Systems Profiler is available at [https://rocm.docs.
 
 - `ROCPROFSYS_BUILD_TESTING` no longer implies `ROCPROFSYS_BUILD_EXAMPLES`.
 
+- Internal: rewrote `core/state.hpp`'s process/thread state tracking from free
+  functions and macros into two static-method classes, `process_state` and
+  `thread_state`. The `ROCPROFSYS_SCOPED_THREAD_STATE(...)` macro is replaced by a
+  `[[nodiscard]]` `thread_state::scoped(...)` factory returning an RAII guard, and
+  `process_state`'s transition logging is now injected via a policy type, making the
+  state machine unit-testable in isolation (see `core/tests/test_state.cpp`). No
+  user-visible behavior change.
+
 ### Removed
 
 - Removed the `-p` / `--pid` option from `rocprof-sys-instrument` for attaching to
