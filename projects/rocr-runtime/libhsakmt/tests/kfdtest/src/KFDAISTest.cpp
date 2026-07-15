@@ -1,25 +1,5 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
- * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- * OTHER DEALINGS IN THE SOFTWARE.
- *
- */
+// Copyright © Advanced Micro Devices, Inc., or its affiliates.
+// SPDX-License-Identifier:  MIT
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -195,7 +175,7 @@ void KFDAISTest::deleteTestFiles() {
 int KFDAISTest::fillFileWithPatterns(int fd, size_t fileSize, size_t chunkSize,
                                      std::vector<uint32_t> &patterns) {
     const uint32_t START_PATTERN = 0x11111111;
-    int numBuffers = fileSize / chunkSize;
+    size_t numBuffers = fileSize / chunkSize;
 
     patterns.clear();
     patterns.resize(numBuffers);
@@ -211,8 +191,8 @@ int KFDAISTest::fillFileWithPatterns(int fd, size_t fileSize, size_t chunkSize,
 
     lseek(fd, 0, SEEK_SET);
 
-    for (int i = 0; i < numBuffers; i++) {
-        patterns[i] = START_PATTERN + i;
+    for (size_t i = 0; i < numBuffers; i++) {
+        patterns[i] = START_PATTERN + static_cast<uint32_t>(i);
         std::fill(words, words + nWords, patterns[i]);
 
         ssize_t written = write(fd, buffer.get(), chunkSize);
@@ -341,8 +321,9 @@ int KFDAISTest::aisReadWrite(void *buf, size_t size, int fd, off_t fileOffset,
  * Test 1: AISGracefulFailureTest
  *
  * Tests that the AIS API fails gracefully (returns error, does not crash)
- * when used with a non-NVME backed file. This test always runs on /tmp
- * regardless of NVME availability to ensure the driver handles the error case.
+ * when used with a non-NVME backed file. This test forces a non-NVMe tmpfs
+ * (/dev/shm) so the graceful-failure path is always exercised, even on hosts
+ * where /tmp itself is NVMe-backed.
  */
 TEST_F(KFDAISTest, AISGracefulFailureTest) {
     TEST_REQUIRE_ENV_CAPABILITIES(ENVCAPS_64BITLINUX);
@@ -355,7 +336,7 @@ TEST_F(KFDAISTest, AISGracefulFailureTest) {
 
     ASSERT_GE(m_gpuNode, 0) << "Failed to get default GPU node";
 
-    m_testDir = "/tmp/";
+    m_testDir = "/dev/shm/";
     m_testFilePath = m_testDir + TEST_FILENAME;
 
     m_fd = createTestFile(m_testFilePath, FILE_SIZE_BASIC);
