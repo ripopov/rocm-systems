@@ -1944,3 +1944,37 @@ def test_ev124_125_arch_gating_in_generated_operand(amdgpu_generated_root: Path)
     cdna4_op = (amdgpu_generated_root / 'cdna4' / 'operand.cpp').read_text()
     assert 'if (ev == 124)\n    return wf.m0()' in cdna4_op
     assert 'ev == 125' not in cdna4_op.split('can_resolve_src_scalar')[1].split('}')[0]
+
+
+def test_cdna4_mfma_f8f6f4_accepts_standalone_and_prefixed_encodings(
+    amdgpu_generated_root: Path,
+):
+    decoder = (amdgpu_generated_root / 'cdna4' / 'decoder.cpp').read_text()
+    header = (amdgpu_generated_root / 'cdna4' / 'vop3p.h').read_text()
+    source = (amdgpu_generated_root / 'cdna4' / 'vop3p.cpp').read_text()
+
+    assert 'VMfmaF3216x16x128F8f6f4Vop3pMfma>(opcode + 2, true)' in decoder
+    assert 'Decoder::decodeVMfmaF3216x16x128F8f6f4Vop3pMfma' in decoder
+    assert 'bool has_vop3px2_prefix = false' in header
+    assert 'if (has_vop3px2_prefix)' in source
+
+
+def test_generated_atomic_def_use_follows_return_control(
+    amdgpu_generated_root: Path,
+):
+    cdna4_flat = (amdgpu_generated_root / 'cdna4' / 'flat.cpp').read_text()
+    cdna4_add = cdna4_flat.split('FlatAtomicAddX2Flat::FlatAtomicAddX2Flat')[1]
+    cdna4_add = cdna4_add.split('void FlatAtomicAddX2Flat::execute_impl')[0]
+    assert 'num_dst_ = 0;' in cdna4_add
+    assert 'if ((inst_.sc0 != 0))' in cdna4_add
+    assert 'dst_operands_[num_dst_++] = &vdst;' in cdna4_add
+
+    gfx1250_buffer = (amdgpu_generated_root / 'gfx1250' / 'vbuffer.cpp').read_text()
+    gfx1250_add = gfx1250_buffer.split(
+        'BufferAtomicAddU32Vbuffer::BufferAtomicAddU32Vbuffer'
+    )[1]
+    gfx1250_add = gfx1250_add.split('void BufferAtomicAddU32Vbuffer::execute_impl')[0]
+    assert 'src_operands_[0] = &vdata;' in gfx1250_add
+    assert 'num_dst_ = 0;' in gfx1250_add
+    assert 'if (amdgpu::gfx12_atomic_returns(inst_.th))' in gfx1250_add
+    assert 'dst_operands_[num_dst_++] = &vdata;' in gfx1250_add

@@ -2259,6 +2259,12 @@ class CodeGenerator:
     def _supports_cdna_mfma_f8f6f4_vop3px2(self) -> bool:
         return self.isa_spec.arch_name.lower() == 'cdna4'
 
+    def _is_cdna_mfma_f8f6f4_vop3px2_suffix(self, inst: Instruction) -> bool:
+        return (
+            self._supports_cdna_mfma_f8f6f4_vop3px2()
+            and inst.name in self.isa_spec.profile.inst_size_overrides
+        )
+
     @staticmethod
     def _emit_cdna_mfma_f8f6f4_vop3px2_decoder_helpers() -> str:
         return textwrap.dedent('''\
@@ -5750,6 +5756,7 @@ class CodeGenerator:
                     private_members = []
                     opnd_ctor_init = []
                     opnd_body = []
+                    conditional_dst_body = []
                     vgpr_msb_role_body = []
                     src_idx = 0
                     dst_idx = 0
@@ -5777,7 +5784,17 @@ class CodeGenerator:
                         if opnd_size_expr is None:
                             opnd_size_expr = str(opnd.size)
                         operand_size_exprs[opnd.name] = opnd_size_expr
-                        if opnd.is_input:
+                        # Some ISA XMLs describe a buffer atomic's vdata only
+                        # as an output even though it always supplies the
+                        # atomic payload.  Keep the source dependency
+                        # independent of whether the old memory value is
+                        # returned.
+                        _is_buffer_atomic_payload = (
+                            inst_sem is not None
+                            and inst_sem.semantic_class == 'buffer_atomic'
+                            and opnd.name == 'vdata'
+                        )
+                        if opnd.is_input or _is_buffer_atomic_payload:
                             opnd_body.append(
                                 f'src_operands_[{src_idx}] = &{opnd.name};'
                             )
@@ -5791,7 +5808,27 @@ class CodeGenerator:
                                 f'src_operands_[{src_idx}] = &{opnd.name};'
                             )
                             src_idx += 1
-                        if opnd.is_output:
+                        _is_optional_atomic_return = (
+                            opnd.is_output
+                            and inst_sem is not None
+                            and (
+                                (
+                                    inst_sem.semantic_class == 'flat_atomic'
+                                    and opnd.name == 'vdst'
+                                )
+                                or (
+                                    inst_sem.semantic_class == 'buffer_atomic'
+                                    and opnd.name == 'vdata'
+                                )
+                            )
+                        )
+                        if _is_optional_atomic_return:
+                            sc0, _, _ = self._coherency_exprs()
+                            conditional_dst_body.append(
+                                f'if ({self._atomic_return_expr(sc0)}) '
+                                f'dst_operands_[num_dst_++] = &{opnd.name};'
+                            )
+                        elif opnd.is_output:
                             opnd_body.append(
                                 f'dst_operands_[{dst_idx}] = &{opnd.name};'
                             )
@@ -5863,7 +5900,12 @@ class CodeGenerator:
 
                     class_ctor_decl = cgen.FunctionDeclaration(
                         cgen.Value('', inst.fmt_name),
-                        [cgen.Value('const MachineInst *', 'inst')],
+                        [cgen.Value('const MachineInst *', 'inst')]
+                        + (
+                            [cgen.Value('bool', 'has_vop3px2_prefix = false')]
+                            if self._is_cdna_mfma_f8f6f4_vop3px2_suffix(inst)
+                            else []
+                        ),
                     )
                     public_members.append(class_ctor_decl)
                     public_members.append(
@@ -5971,6 +6013,7 @@ class CodeGenerator:
                     ctor_body_parts = list(opnd_body)
                     ctor_body_parts.append(f'num_src_ = {src_idx};')
                     ctor_body_parts.append(f'num_dst_ = {dst_idx};')
+                    ctor_body_parts.extend(conditional_dst_body)
 
                     # Flat segment-aware operands: adjust addr width and add
                     # saddr for SCRATCH (seg==1) and GLOBAL (seg==2) segments.
@@ -6264,11 +6307,22 @@ class CodeGenerator:
                     # instructions decoded under 64-bit VOP3P_MFMA).
                     _size_overrides = self.isa_spec.profile.inst_size_overrides
                     if inst.name in _size_overrides:
-                        ctor_body_parts.append(f'size_ = {_size_overrides[inst.name]};')
-                        ctor_body_parts.append(
-                            'raw_words_ = {inst[-2], inst[-1], inst[0], inst[1]};'
-                            'raw_encoding_ = raw_words_.data();'
-                        )
+                        if self._is_cdna_mfma_f8f6f4_vop3px2_suffix(inst):
+                            ctor_body_parts.append(
+                                f'if (has_vop3px2_prefix) {{'
+                                f' size_ = {_size_overrides[inst.name]};'
+                                ' raw_words_ = {inst[-2], inst[-1], inst[0], inst[1]};'
+                                ' raw_encoding_ = raw_words_.data();'
+                                '}'
+                            )
+                        else:
+                            ctor_body_parts.append(
+                                f'size_ = {_size_overrides[inst.name]};'
+                            )
+                            ctor_body_parts.append(
+                                'raw_words_ = {inst[-2], inst[-1], inst[0], inst[1]};'
+                                'raw_encoding_ = raw_words_.data();'
+                            )
                         private_members.append(
                             cgen.Statement('std::array<uint32_t, 4> raw_words_{}')
                         )
@@ -6276,7 +6330,13 @@ class CodeGenerator:
                     ctor_body = ''.join(ctor_body_parts)
                     class_ctor_impl_str = (
                         f'{inst.fmt_name}::'
-                        f'{inst.fmt_name}(const MachineInst *inst) '
+                        f'{inst.fmt_name}(const MachineInst *inst'
+                        + (
+                            ', bool has_vop3px2_prefix'
+                            if self._is_cdna_mfma_f8f6f4_vop3px2_suffix(inst)
+                            else ''
+                        )
+                        + ') '
                         f': {init_list} '
                         f'{{{ctor_body}}}'
                     )
@@ -8994,8 +9054,8 @@ inline void unpack_6bit(const uint32_t dwords[6], uint8_t vals[32]) {{
                     '  if (isMfmaScaleF8f6f4Vop3px2(opcode)) {\n'
                     '    auto op2 = (opcode[2] >> 16) & 0x7Fu;\n'
                     '    if (op2 == 45)\n'
-                    '      return std::make_unique<VMfmaF3216x16x128F8f6f4Vop3pMfma>(opcode + 2);\n'
-                    '    return std::make_unique<VMfmaF3232x32x64F8f6f4Vop3pMfma>(opcode + 2);\n'
+                    '      return std::make_unique<VMfmaF3216x16x128F8f6f4Vop3pMfma>(opcode + 2, true);\n'
+                    '    return std::make_unique<VMfmaF3232x32x64F8f6f4Vop3pMfma>(opcode + 2, true);\n'
                     '  }\n'
                 )
             )
@@ -9072,6 +9132,9 @@ inline void unpack_6bit(const uint32_t dwords[6], uint8_t vals[32]) {{
                                 if (
                                     inst.name
                                     in self.isa_spec.profile.inst_size_overrides
+                                    and not self._is_cdna_mfma_f8f6f4_vop3px2_suffix(
+                                        inst
+                                    )
                                 ):
                                     _dte.sub_decode_funcs[inst.opcode] = 'decodeInvalid'
                         _custom_decode_bodies[_pfx] = cgen.Block(

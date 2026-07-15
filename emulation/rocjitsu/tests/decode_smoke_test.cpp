@@ -763,6 +763,39 @@ TEST(Rdna4DecodeTest, Vop3CompareWritesSingleScalarMaskRegister) {
   EXPECT_FALSE(def_use.defs.contains({RegClass::SGPR, 3, 1}));
 }
 
+TEST(Cdna4DecodeTest, MfmaF8f6f4DecodesStandaloneVop3pSuffix) {
+  const uint32_t words[] = {
+      0xD3AD0024u,
+      0x0492F572u,
+  };
+
+  auto decoder = Decoder::create(ROCJITSU_CODE_ARCH_CDNA4);
+  ASSERT_NE(decoder, nullptr);
+  std::unique_ptr<Instruction> inst(decoder->decode(words));
+  ASSERT_NE(inst, nullptr);
+  EXPECT_EQ(inst->mnemonic(), "v_mfma_f32_16x16x128_f8f6f4");
+  EXPECT_EQ(inst->size(), sizeof(words));
+
+  InstDefUse def_use(*inst);
+  EXPECT_TRUE(def_use.defs.contains({RegClass::VGPR, 36, 4}));
+}
+
+TEST(Cdna4DecodeTest, MfmaScaleF8f6f4ConsumesVop3px2Prefix) {
+  const uint32_t words[] = {
+      0xD3AC0000u,
+      0x00000000u,
+      0xD3AD0000u,
+      0x04020100u,
+  };
+
+  auto decoder = Decoder::create(ROCJITSU_CODE_ARCH_CDNA4);
+  ASSERT_NE(decoder, nullptr);
+  std::unique_ptr<Instruction> inst(decoder->decode(words));
+  ASSERT_NE(inst, nullptr);
+  EXPECT_EQ(inst->mnemonic(), "v_mfma_f32_16x16x128_f8f6f4");
+  EXPECT_EQ(inst->size(), sizeof(words));
+}
+
 TEST(Gfx1250DecodeTest, WmmaScaleF8f6f4ConsumesFourDwords) {
   const uint32_t words[] = {
       0xCC350000u,
