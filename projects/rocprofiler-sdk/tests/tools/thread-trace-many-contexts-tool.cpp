@@ -55,13 +55,13 @@ struct ToolState
     // Sequencing of the one-active-trace-per-agent rotation. Kernel-dispatch
     // callbacks fire concurrently, so all rotation state is guarded by seq_mut.
     std::mutex seq_mut{};
-    size_t     active_index{0};   // next context to run
+    size_t     active_index{0};  // next context to run
     bool       trace_active{false};
     uint64_t   start_dispatch{0};
 
     // Contexts (by index) that delivered shader data.
-    std::mutex        mut{};
-    std::set<size_t>  captured{};
+    std::mutex       mut{};
+    std::set<size_t> captured{};
 };
 
 ToolState* state = nullptr;
@@ -70,9 +70,9 @@ ToolState* state = nullptr;
 size_t
 num_contexts()
 {
-    static const size_t n =
-        std::getenv("ATT_NUM_CONTEXTS") ? std::strtoul(std::getenv("ATT_NUM_CONTEXTS"), nullptr, 10)
-                                        : 400;
+    static const size_t n = std::getenv("ATT_NUM_CONTEXTS")
+                                ? std::strtoul(std::getenv("ATT_NUM_CONTEXTS"), nullptr, 10)
+                                : 400;
     return n;
 }
 
@@ -93,9 +93,9 @@ void
 shader_data_callback(rocprofiler_agent_id_t /* agent */,
                      int64_t /* se_id */,
                      void* /* se_data */,
-                     size_t                                       data_size,
+                     size_t data_size,
                      rocprofiler_thread_trace_shader_data_flags_t /* flags */,
-                     rocprofiler_user_data_t                      userdata)
+                     rocprofiler_user_data_t userdata)
 {
     if(data_size == 0 || state == nullptr) return;
     // userdata carries the context index this service was configured with.
@@ -188,9 +188,9 @@ tool_init(rocprofiler_client_finalize_t /* fini_func */, void* /* tool_data */)
 
     // Vary the configuration across contexts; buffer size is intentionally large so
     // the per-agent shared buffer (sized to the max) is ~1GB.
-    constexpr uint64_t GB               = 1ull << 30;
-    const uint64_t     buffer_sizes[]   = {1 * GB, 512ull << 20};
-    const uint32_t     simd_selects[]   = {0xF, 0x1, 0x2, 0x4, 0x8};
+    constexpr uint64_t GB             = 1ull << 30;
+    const uint64_t     buffer_sizes[] = {1 * GB, 512ull << 20};
+    const uint32_t     simd_selects[] = {0xF, 0x1, 0x2, 0x4, 0x8};
 
     const size_t N = num_contexts();
     state->contexts.reserve(N);
@@ -211,10 +211,10 @@ tool_init(rocprofiler_client_finalize_t /* fini_func */, void* /* tool_data */)
         rocprofiler_context_id_t ctx{};
         ROCPROFILER_CALL(rocprofiler_create_context(&ctx), "context creation");
 
-        uint32_t target_cu = static_cast<uint32_t>(i % 4);          // CUs in [0,3]
-        uint32_t se_mask    = (i % 2) != 0 ? 0x3u : 0x1u;
-        uint32_t simd       = simd_selects[i % (sizeof(simd_selects) / sizeof(uint32_t))];
-        uint64_t buf_size   = buffer_sizes[i % 2];
+        uint32_t target_cu = static_cast<uint32_t>(i % 4);  // CUs in [0,3]
+        uint32_t se_mask   = (i % 2) != 0 ? 0x3u : 0x1u;
+        uint32_t simd      = simd_selects[i % (sizeof(simd_selects) / sizeof(uint32_t))];
+        uint64_t buf_size  = buffer_sizes[i % 2];
 
         auto params = std::vector<rocprofiler_thread_trace_parameter_t>{};
         params.push_back({ROCPROFILER_THREAD_TRACE_PARAMETER_TARGET_CU, {target_cu}});
@@ -255,8 +255,7 @@ tool_fini(void* /* tool_data */)
         // Deliberately do NOT stop the trace context: leave SQTT active so rocprofiler
         // teardown destroys the still-active per-agent tracers one-by-one (AILIKFD-39).
         rocprofiler_stop_context(state->tracing_ctx);
-        std::cerr << "[many-contexts] leave-active: trace left running into teardown"
-                  << std::endl;
+        std::cerr << "[many-contexts] leave-active: trace left running into teardown" << std::endl;
         return;  // keep `state` alive; process is exiting
     }
 
@@ -307,8 +306,8 @@ rocprofiler_configure(uint32_t /* version */,
 {
     if(priority > 0) return nullptr;
 
-    id->name                             = "ATT_test_many_contexts";
-    ATTTest::ManyContexts::client_id     = id;
+    id->name                         = "ATT_test_many_contexts";
+    ATTTest::ManyContexts::client_id = id;
 
     static auto cfg =
         rocprofiler_tool_configure_result_t{sizeof(rocprofiler_tool_configure_result_t),

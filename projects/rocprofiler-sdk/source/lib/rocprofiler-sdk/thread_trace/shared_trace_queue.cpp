@@ -65,9 +65,8 @@ void
 register_shared_queue_size(hsa_agent_t agent, uint64_t triple_buffer_size)
 {
     get_state().wlock([&](shared_queue_state_t& state) {
-        auto& entry = state.agents[agent.handle];
-        entry.max_triple_buffer_size =
-            std::max(entry.max_triple_buffer_size, triple_buffer_size);
+        auto& entry                  = state.agents[agent.handle];
+        entry.max_triple_buffer_size = std::max(entry.max_triple_buffer_size, triple_buffer_size);
     });
 }
 

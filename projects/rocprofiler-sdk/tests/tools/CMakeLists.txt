@@ -92,8 +92,8 @@ set_target_properties(
 
 # many-contexts thread trace tool (shared buffer stress: hundreds of ~1GB contexts)
 add_library(thread-trace-many-contexts-tool SHARED)
-target_sources(thread-trace-many-contexts-tool
-               PRIVATE thread-trace-many-contexts-tool.cpp thread-trace-callbacks.cpp)
+target_sources(thread-trace-many-contexts-tool PRIVATE thread-trace-many-contexts-tool.cpp
+                                                       thread-trace-callbacks.cpp)
 target_link_libraries(thread-trace-many-contexts-tool
                       PRIVATE ${THREAD_TRACE_TOOL_LINK_LIBRARIES})
 set_target_properties(

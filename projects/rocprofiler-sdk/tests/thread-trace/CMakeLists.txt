@@ -74,9 +74,9 @@ rocprofiler_add_integration_execute_test(
     ENVIRONMENT "ATT_LARGE_BUFFER_TEST=1"
     DISABLED ${IS_DISABLED})
 
-# Shared-buffer stress (AIPROFSDK-102): allocate hundreds of ~1GB contexts with
-# varying params and run each once. Only fits in memory because all contexts on an
-# agent share one buffer; a per-context buffer (old impl) would need ~400GB and OOM.
+# Shared-buffer stress (AIPROFSDK-102): allocate hundreds of ~1GB contexts with varying
+# params and run each once. Only fits in memory because all contexts on an agent share one
+# buffer; a per-context buffer (old impl) would need ~400GB and OOM.
 rocprofiler_add_integration_execute_test(
     thread-trace-api-many-contexts-test
     TARGET thread-trace-test-app
