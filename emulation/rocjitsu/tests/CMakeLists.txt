@@ -444,6 +444,24 @@ rj_configure_target(rocjitsu_tests TEST)
 # ./rocjitsu_tests --gtest_filter='*Benchmark*').
 rj_add_gtest_tests(rocjitsu_tests TEST_FILTER -*Benchmark*)
 
+# --- CLI launcher preload tests ---
+
+add_executable(launch_preload_test launch_preload_test.cpp)
+target_link_libraries(
+    launch_preload_test
+    PRIVATE rocjitsu_cli_launch_preload GTest::gtest_main
+)
+if(RJ_ENABLE_ASAN AND RJ_SANITIZE_SHARED)
+    target_compile_definitions(
+        launch_preload_test
+        PRIVATE
+            RJ_EXPECT_SHARED_ASAN_RUNTIME=1
+            RJ_EXPECTED_SHARED_ASAN_RUNTIME="${RJ_ASAN_SHARED_LIBRARY}"
+    )
+endif()
+rj_configure_target(launch_preload_test TEST)
+rj_add_gtest_tests(launch_preload_test)
+
 # --- DBI probe fixture test ---
 # Loads a real amdclang++-compiled rj_nop_probe device ELF and exercises the
 # probe symbol resolver against it. Needs the compiled fixture (amdclang++ +
