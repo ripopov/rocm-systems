@@ -456,8 +456,6 @@ ncclResult_t ncclAlltoAllv_impl(const void *sendbuff, const size_t sendcounts[],
 
   if (comm->nNodes == 1 && (comm->config.CTAPolicy & NCCL_CTA_POLICY_ZERO)) {
         const size_t nLocal = 4 * (size_t)nRanks;
-        const size_t nGather = nLocal * (size_t)nRanks;
-
         CUDACHECK(cudaMemcpyAsync(comm->localSizes, sizes.data(), nLocal * sizeof(size_t),
                                 cudaMemcpyHostToDevice, stream));
         NCCLCHECK(ncclGroupStart());
