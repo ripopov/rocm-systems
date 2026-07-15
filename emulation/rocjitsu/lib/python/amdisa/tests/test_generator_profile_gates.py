@@ -794,6 +794,8 @@ def test_gfx1250_profile_enables_generator_backed_quirks():
     assert profile.generate_scaled_wmma_vop3px2
     assert profile.smem_address_uses_access_size
     assert profile.vop3_cmp_sdst_size_bits == 32
+    assert profile.vop3_cndmask_selector_size_bits == 32
+    assert profile.vop3_carry_mask_size_bits == 32
 
 
 def test_rdna3_profile_enables_gfx11_vop3_true16_only():
@@ -815,6 +817,8 @@ def test_rdna4_profile_enables_gfx12_true16_but_keeps_gfx1250_quirks_disabled():
     assert not profile.generate_scaled_wmma_vop3px2
     assert not profile.smem_address_uses_access_size
     assert profile.vop3_cmp_sdst_size_bits == 32
+    assert profile.vop3_cndmask_selector_size_bits == 32
+    assert profile.vop3_carry_mask_size_bits == 32
 
 
 def test_rdna4_vop3_compare_sdst_uses_wave32_mask_size():
@@ -828,6 +832,33 @@ def test_rdna4_vop3_compare_sdst_uses_wave32_mask_size():
     assert codegen._operand_size_override('ENC_VOP3', dst, sem) == '32'
     assert codegen._operand_size_override('ENC_VOPC', dst, sem) is None
     assert codegen._operand_size_override('ENC_VOP3', src, sem) is None
+
+
+def test_rdna4_vop3_cndmask_selector_uses_wave32_mask_size():
+    codegen = object.__new__(CodeGenerator)
+    codegen.isa_spec = SimpleNamespace(profile=Rdna4Profile())
+    sem = SimpleNamespace(semantic_class='vector_cndmask')
+
+    selector = SimpleNamespace(is_output=False, name='src2', operand_type='OPR_SREG')
+    source = SimpleNamespace(is_output=False, name='src0', operand_type='OPR_SRC')
+
+    assert codegen._operand_size_override('ENC_VOP3', selector, sem) == '32'
+    assert codegen._operand_size_override('ENC_VOP3', source, sem) is None
+
+
+def test_rdna4_vop3_carry_operands_use_wave32_mask_size():
+    codegen = object.__new__(CodeGenerator)
+    codegen.isa_spec = SimpleNamespace(profile=Rdna4Profile())
+    sem = SimpleNamespace(semantic_class='vector_add_co')
+
+    carry_out = SimpleNamespace(is_output=True, name='sdst', operand_type='OPR_SREG')
+    carry_in = SimpleNamespace(is_output=False, name='src2', operand_type='OPR_SREG')
+    source = SimpleNamespace(is_output=False, name='src0', operand_type='OPR_SRC')
+
+    assert codegen._operand_size_override('ENC_VOP3', carry_out, sem) == '32'
+    assert codegen._operand_size_override('ENC_VOP3', carry_in, sem) == '32'
+    assert codegen._operand_size_override('ENC_VOP3', source, sem) is None
+    assert codegen._operand_size_override('ENC_VOP2', carry_out, sem) is None
 
 
 def test_ds_swizzle_generator_uses_addr_source_for_ds_and_vds():

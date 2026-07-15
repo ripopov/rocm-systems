@@ -370,6 +370,16 @@ class IsaProfile(ABC):
         return None
 
     @property
+    def vop3_cndmask_selector_size_bits(self) -> int | None:
+        """Explicit VOP3 cndmask scalar-selector width, if target-specific."""
+        return None
+
+    @property
+    def vop3_carry_mask_size_bits(self) -> int | None:
+        """Explicit VOP3 carry input/output mask width, if target-specific."""
+        return None
+
+    @property
     def waitcnt_decode(self) -> str:
         """Return C++ code block that decodes a WAITCNT immediate into
         vmcnt, expcnt, and lgkmcnt local variables.
@@ -1467,6 +1477,14 @@ class Rdna4Profile(_AmdgpuProfileBase):
 
     @property
     def vop3_cmp_sdst_size_bits(self) -> int | None:
+        return 32
+
+    @property
+    def vop3_cndmask_selector_size_bits(self) -> int | None:
+        return 32
+
+    @property
+    def vop3_carry_mask_size_bits(self) -> int | None:
         return 32
 
     @property

@@ -238,6 +238,10 @@ inline void write_wave_mask_scalar(const Op &op, Wavefront &wf, uint64_t mask) {
   write_explicit_lane_mask(op, wf, mask);
 }
 
+template <typename Op> inline uint64_t read_wave_mask_scalar(const Op &op, Wavefront &wf) {
+  return op.size_bits() <= 32 ? static_cast<uint64_t>(op.read_scalar(wf)) : op.read_scalar64(wf);
+}
+
 template <typename MachineInst> inline uint32_t vop3_opsel(const MachineInst &inst) {
   if constexpr (requires { inst.opsel; })
     return inst.opsel;
@@ -1307,8 +1311,9 @@ template <typename Inst> [[nodiscard]] bool try_execute_cndmask_vop2_simd(Inst &
 }
 
 /// v_cndmask_b32 VOP3 form: dst[lane] = (sel[lane]) ? src1 : src0, where `sel`
-/// is the 64-bit value read from the SGPR-pair `src2` (instead of the fixed VCC
-/// used by the VOP2 form). VOP3 source modifiers are bitwise sign modifiers for
+/// is the wave-mask value read from scalar `src2` (instead of the fixed VCC
+/// used by the VOP2 form). GFX12 uses one SGPR; earlier wave64-capable encodings
+/// use a pair. VOP3 source modifiers are bitwise sign modifiers for
 /// this B32 select: abs clears bit 31 and neg flips bit 31 before selection.
 /// `src2` is an SGPR/inline operand, not a VGPR, so it does not participate in
 /// the simd_capable gate; src0/src1/vdst do.
@@ -1322,7 +1327,9 @@ template <typename Inst>
   constexpr std::size_t W = util::native_width_v<T>;
   const uint64_t chunk_full = util::mask<uint64_t>(static_cast<int>(W));
   const uint64_t exec = wf.exec();
-  const uint64_t sel64 = inst.src2.read_scalar64(wf);
+  const uint64_t sel64 = inst.src2.size_bits() <= 32
+                             ? static_cast<uint64_t>(inst.src2.read_scalar(wf))
+                             : inst.src2.read_scalar64(wf);
   // Resolve operand base pointers once; see try_execute_binary_vop2_simd.
   const VgprStorage *r0 = simd_src_reg(inst.src0, wf);
   const VgprStorage *r1 = simd_src_reg(inst.src1, wf);
@@ -3169,7 +3176,7 @@ template <typename Inst, typename CarryOp>
   constexpr std::size_t W = util::native_width_v<T>;
   const uint64_t chunk_full = util::mask<uint64_t>(static_cast<int>(W));
   const uint64_t exec = wf.exec();
-  const uint64_t cin_all = inst.src2.read_scalar64(wf);
+  const uint64_t cin_all = read_wave_mask_scalar(inst.src2, wf);
   uint64_t carry_out = 0;
   const VgprStorage *r0 = simd_src_reg(inst.src0, wf);
   const VgprStorage *r1 = simd_src_reg(inst.src1, wf);

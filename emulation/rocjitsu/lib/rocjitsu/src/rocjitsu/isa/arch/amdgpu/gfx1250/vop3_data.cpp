@@ -597,7 +597,7 @@ VCndmaskB32Vop3::VCndmaskB32Vop3(const MachineInst *inst)
       vdst(32, OperandType::OPR_VGPR, reinterpret_cast<const OpEncoding *>(inst)->vdst),
       src0(32, OperandType::OPR_SRC, reinterpret_cast<const OpEncoding *>(inst)->src0),
       src1(32, OperandType::OPR_SRC, reinterpret_cast<const OpEncoding *>(inst)->src1),
-      src2(64, OperandType::OPR_SREG, reinterpret_cast<const OpEncoding *>(inst)->src2) {
+      src2(32, OperandType::OPR_SREG, reinterpret_cast<const OpEncoding *>(inst)->src2) {
   dst_operands_[0] = &vdst;
   src_operands_[0] = &src0;
   src_operands_[1] = &src1;
@@ -628,14 +628,14 @@ VCndmaskB32Vop3::VCndmaskB32Vop3(const MachineInst *inst)
   }
   if (reinterpret_cast<const OpEncoding *>(inst)->src2 == 255)
     src2 = Operand(
-        64, OperandType::OPR_SIMM32,
+        32, OperandType::OPR_SIMM32,
         static_cast<int>(reinterpret_cast<const Vop3InstLiteralMachineInst *>(inst)->simm32));
   if (reinterpret_cast<const OpEncoding *>(inst)->src2 == 254) {
     const auto *words = reinterpret_cast<const uint32_t *>(inst);
     uint32_t literal_word = sizeof(OpEncoding) / sizeof(uint32_t);
     uint64_t literal64 =
         (static_cast<uint64_t>(words[literal_word + 1]) << 32) | words[literal_word];
-    src2 = Operand(64, OperandType::OPR_SIMM64, literal64, true);
+    src2 = Operand(32, OperandType::OPR_SIMM64, literal64, true);
   }
   if (amdgpu::dpp::is_src_dpp8(reinterpret_cast<const OpEncoding *>(inst)->src0)) {
     auto *dp8 = reinterpret_cast<const Vop3VopDpp8MachineInst *>(inst);

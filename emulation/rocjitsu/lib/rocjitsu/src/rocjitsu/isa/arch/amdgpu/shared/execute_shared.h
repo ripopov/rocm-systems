@@ -2709,9 +2709,10 @@ inline void execute_v_add_co_ci_u32_vop3([[maybe_unused]] Inst &inst,
     if (!(exec & (1ULL << lane)))
       continue;
     inst.vdst.write_lane(wf, lane, [&]() {
-      uint64_t w = static_cast<uint64_t>(inst.src0.read_lane(wf, lane)) +
-                   static_cast<uint64_t>(inst.src1.read_lane(wf, lane)) +
-                   static_cast<uint64_t>(((inst.src2.read_scalar64(wf) >> lane) & 1));
+      uint64_t w =
+          static_cast<uint64_t>(inst.src0.read_lane(wf, lane)) +
+          static_cast<uint64_t>(inst.src1.read_lane(wf, lane)) +
+          static_cast<uint64_t>(((amdgpu::read_wave_mask_scalar(inst.src2, wf) >> lane) & 1));
       if (w > 0xFFFFFFFFULL)
         vcc |= (1ULL << lane);
       else
@@ -3115,9 +3116,10 @@ inline void execute_v_addc_co_u32_vop3([[maybe_unused]] Inst &inst,
     if (!(exec & (1ULL << lane)))
       continue;
     inst.vdst.write_lane(wf, lane, [&]() {
-      uint64_t w = static_cast<uint64_t>(inst.src0.read_lane(wf, lane)) +
-                   static_cast<uint64_t>(inst.src1.read_lane(wf, lane)) +
-                   static_cast<uint64_t>(((inst.src2.read_scalar64(wf) >> lane) & 1));
+      uint64_t w =
+          static_cast<uint64_t>(inst.src0.read_lane(wf, lane)) +
+          static_cast<uint64_t>(inst.src1.read_lane(wf, lane)) +
+          static_cast<uint64_t>(((amdgpu::read_wave_mask_scalar(inst.src2, wf) >> lane) & 1));
       if (w > 0xFFFFFFFFULL)
         vcc |= (1ULL << lane);
       else
@@ -7969,8 +7971,14 @@ inline void execute_v_cndmask_b32_vop3([[maybe_unused]] Inst &inst,
         apply_vop3_b32_src_mod(inst.src0.read_lane(wf, lane), inst.inst_.abs, inst.inst_.neg, 0);
     const uint32_t src1_value =
         apply_vop3_b32_src_mod(inst.src1.read_lane(wf, lane), inst.inst_.abs, inst.inst_.neg, 1);
-    inst.vdst.write_lane(wf, lane,
-                         ((inst.src2.read_scalar64(wf) >> lane) & 1) ? src1_value : src0_value);
+    inst.vdst.write_lane(
+        wf, lane,
+        ((((inst.src2.size_bits() <= 32 ? static_cast<uint64_t>(inst.src2.read_scalar(wf))
+                                        : inst.src2.read_scalar64(wf))) >>
+          lane) &
+         1)
+            ? src1_value
+            : src0_value);
   }
 }
 
@@ -17769,7 +17777,8 @@ inline void execute_v_sub_co_ci_u32_vop3([[maybe_unused]] Inst &inst,
     inst.vdst.write_lane(wf, lane, [&]() {
       uint64_t a = static_cast<uint64_t>(inst.src0.read_lane(wf, lane)),
                b = static_cast<uint64_t>(inst.src1.read_lane(wf, lane)),
-               c = static_cast<uint64_t>(((inst.src2.read_scalar64(wf) >> lane) & 1));
+               c = static_cast<uint64_t>(
+                   ((amdgpu::read_wave_mask_scalar(inst.src2, wf) >> lane) & 1));
       if (a < b + c)
         vcc |= (1ULL << lane);
       else
@@ -18096,7 +18105,8 @@ inline void execute_v_subb_co_u32_vop3([[maybe_unused]] Inst &inst,
     inst.vdst.write_lane(wf, lane, [&]() {
       uint64_t a = static_cast<uint64_t>(inst.src0.read_lane(wf, lane)),
                b = static_cast<uint64_t>(inst.src1.read_lane(wf, lane)),
-               c = static_cast<uint64_t>(((inst.src2.read_scalar64(wf) >> lane) & 1));
+               c = static_cast<uint64_t>(
+                   ((amdgpu::read_wave_mask_scalar(inst.src2, wf) >> lane) & 1));
       if (a < b + c)
         vcc |= (1ULL << lane);
       else
@@ -18157,7 +18167,8 @@ inline void execute_v_subbrev_co_u32_vop3([[maybe_unused]] Inst &inst,
     inst.vdst.write_lane(wf, lane, [&]() {
       uint64_t a = static_cast<uint64_t>(inst.src1.read_lane(wf, lane)),
                b = static_cast<uint64_t>(inst.src0.read_lane(wf, lane)),
-               c = static_cast<uint64_t>(((inst.src2.read_scalar64(wf) >> lane) & 1));
+               c = static_cast<uint64_t>(
+                   ((amdgpu::read_wave_mask_scalar(inst.src2, wf) >> lane) & 1));
       if (a < b + c)
         vcc |= (1ULL << lane);
       else
@@ -18211,7 +18222,8 @@ inline void execute_v_subrev_co_ci_u32_vop3([[maybe_unused]] Inst &inst,
     inst.vdst.write_lane(wf, lane, [&]() {
       uint64_t a = static_cast<uint64_t>(inst.src1.read_lane(wf, lane)),
                b = static_cast<uint64_t>(inst.src0.read_lane(wf, lane)),
-               c = static_cast<uint64_t>(((inst.src2.read_scalar64(wf) >> lane) & 1));
+               c = static_cast<uint64_t>(
+                   ((amdgpu::read_wave_mask_scalar(inst.src2, wf) >> lane) & 1));
       if (a < b + c)
         vcc |= (1ULL << lane);
       else
