@@ -60,18 +60,21 @@ jobs:
             enable_ubsan: 0
             enable_tsan: 0
             enable_msan: 0
+            sanitize_shared: 0
           - name: asan-ubsan
             build_type: RelWithDebInfo
             enable_asan: 1
             enable_ubsan: 1
             enable_tsan: 0
             enable_msan: 0
+            sanitize_shared: 0
           - name: asan-ubsan-gcc
             build_type: RelWithDebInfo
             enable_asan: 1
             enable_ubsan: 1
             enable_tsan: 0
             enable_msan: 0
+            sanitize_shared: 1
             c_compiler: gcc
             cxx_compiler: g++
 
@@ -178,7 +181,8 @@ jobs:
             -DRJ_ENABLE_ASAN=${{ matrix.enable_asan }} \
             -DRJ_ENABLE_UBSAN=${{ matrix.enable_ubsan }} \
             -DRJ_ENABLE_TSAN=${{ matrix.enable_tsan }} \
-            -DRJ_ENABLE_MSAN=${{ matrix.enable_msan }}
+            -DRJ_ENABLE_MSAN=${{ matrix.enable_msan }} \
+            -DRJ_SANITIZE_SHARED=${{ matrix.sanitize_shared }}
 
           cmake --build "${ROCJITSU_BUILD_DIR}"
 
