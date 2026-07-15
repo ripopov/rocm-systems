@@ -24,6 +24,7 @@
 // iteration, and integration with the public API surface.
 #include "lib/rocprofiler-sdk/thread_trace/core.hpp"
 #include "lib/rocprofiler-sdk/thread_trace/shared_trace_buffer.hpp"
+#include "lib/rocprofiler-sdk/thread_trace/shared_trace_queue.hpp"
 #include "lib/rocprofiler-sdk/thread_trace/threading.hpp"
 
 #include "lib/common/container/stable_vector.hpp"
@@ -139,8 +140,9 @@ ThreadTracerAgent::ThreadTracerAgent(thread_trace_parameter_pack _params,
     const auto* agent =
         CHECK_NOTNULL(rocprofiler::agent::get_agent_cache(rocprofiler::agent::get_agent(agent_id)));
 
-    size_t triple_buffer_size = params.triple_buffering ? params.buffer_size : 0ul;
-    queue                     = make_att_queue(*agent, triple_buffer_size);
+    // All contexts on an agent share one queue (only one trace is active per agent at
+    // a time); a queue per context would exhaust the HSA per-agent queue limit.
+    queue = CHECK_NOTNULL(acquire_shared_queue(*agent));
 
     factory = std::make_unique<aql::ThreadTraceAQLPacketFactory>(*agent, this->params, *core, *ext);
     control_packet = factory->construct_control_packet();
@@ -308,7 +310,7 @@ ThreadTracerAgent::start_thread_trace(std::shared_ptr<std::atomic<int>> _flag)
         }
 
         auto worker_data   = std::make_shared<triple_buffer_shared_data_t>();
-        worker_data->queue = queue.get();  // non-owning; ThreadTracerAgent owns queue
+        worker_data->queue = queue;  // non-owning; queue is owned by the shared-queue manager
 
         // Initialize buffer memory pointers from the queue's triple buffer
         for(size_t i = 0; i < worker_data->buffers.size(); i++)
@@ -415,6 +417,18 @@ DispatchThreadTracer::register_shared_buffer_sizes()
     {
         auto hsa_agent = rocprofiler::agent::get_hsa_agent(agent_id);
         if(hsa_agent.has_value()) register_shared_buffer_size(*hsa_agent, pack.buffer_size);
+    }
+}
+
+void
+DispatchThreadTracer::register_shared_queue_sizes()
+{
+    auto lk = std::unique_lock{agents_map_mut};
+    for(const auto& [agent_id, pack] : params)
+    {
+        auto hsa_agent = rocprofiler::agent::get_hsa_agent(agent_id);
+        if(hsa_agent.has_value())
+            register_shared_queue_size(*hsa_agent, pack.triple_buffering ? pack.buffer_size : 0);
     }
 }
 
@@ -593,6 +607,18 @@ DeviceThreadTracer::register_shared_buffer_sizes()
 }
 
 void
+DeviceThreadTracer::register_shared_queue_sizes()
+{
+    std::unique_lock<std::mutex> lk(agent_mut);
+    for(const auto& [agent_id, pack] : params)
+    {
+        auto hsa_agent = rocprofiler::agent::get_hsa_agent(agent_id);
+        if(hsa_agent.has_value())
+            register_shared_queue_size(*hsa_agent, pack.triple_buffering ? pack.buffer_size : 0);
+    }
+}
+
+void
 DeviceThreadTracer::start_context()
 {
     // Per-agent resources don't exist until HSA is registered; the request is
@@ -654,12 +680,20 @@ initialize(HsaApiTable* table)
 {
     ROCP_FATAL_IF(!table->core_ || !table->amd_ext_);
 
-    // Register every context's buffer sizes before resource_init builds buffers,
-    // so the shared per-agent buffers are sized to the max requested size.
+    // Register every context's buffer and queue sizes before resource_init builds
+    // them, so the shared per-agent buffer and queue are sized to the max requested.
     for(auto& ctx : context::get_registered_contexts())
     {
-        if(ctx->device_thread_trace) ctx->device_thread_trace->register_shared_buffer_sizes();
-        if(ctx->dispatch_thread_trace) ctx->dispatch_thread_trace->register_shared_buffer_sizes();
+        if(ctx->device_thread_trace)
+        {
+            ctx->device_thread_trace->register_shared_buffer_sizes();
+            ctx->device_thread_trace->register_shared_queue_sizes();
+        }
+        if(ctx->dispatch_thread_trace)
+        {
+            ctx->dispatch_thread_trace->register_shared_buffer_sizes();
+            ctx->dispatch_thread_trace->register_shared_queue_sizes();
+        }
     }
 
     for(auto& ctx : context::get_registered_contexts())
@@ -704,8 +738,10 @@ finalize()
         if(ctx->dispatch_thread_trace) ctx->dispatch_thread_trace->resource_deinit();
     }
 
-    // ThreadTracerAgents and their packets are gone; release the shared buffers.
+    // ThreadTracerAgents and their packets are gone; release the shared buffers and
+    // queues (both are safe to destroy now that no agent can submit).
     free_shared_buffers();
+    free_shared_queues();
 
     code_object::finalize();
 }

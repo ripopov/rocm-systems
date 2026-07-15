@@ -125,7 +125,9 @@ private:
     /// Acquire a copy of the control packet, with optional increment to active_traces
     std::unique_ptr<hsa::TraceControlAQLPacket> get_control(bool bStart = false);
 
-    att_queue_ptr_t queue{};
+    // Non-owning: the shared-queue manager owns this per-agent queue and frees it in
+    // free_shared_queues().
+    att_queue_t* queue{nullptr};
 
     std::atomic<int> active_traces{0};
     std::mutex       trace_resources_mut{};
@@ -156,6 +158,9 @@ public:
 
     /// Report this context's per-agent buffer sizes to the shared buffer manager.
     void register_shared_buffer_sizes();
+
+    /// Report this context's per-agent queue staging sizes to the shared queue manager.
+    void register_shared_queue_sizes();
 
     void add_agent(rocprofiler_agent_id_t agent, thread_trace_parameter_pack pack)
     {
@@ -196,6 +201,9 @@ public:
 
     /// Report this context's per-agent buffer sizes to the shared buffer manager.
     void register_shared_buffer_sizes();
+
+    /// Report this context's per-agent queue staging sizes to the shared queue manager.
+    void register_shared_queue_sizes();
 
     void add_agent(rocprofiler_agent_id_t id, thread_trace_parameter_pack _params)
     {
