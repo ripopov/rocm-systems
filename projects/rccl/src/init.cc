@@ -439,8 +439,10 @@ static ncclResult_t commFree(ncclComm_t comm) {
   NCCLCHECK(ncclCeFinalize(comm));
 
   if (comm->nNodes == 1) {
-    NCCLCHECK(ncclCudaFree((void *)comm->localSizes, comm->memManager));
-    hipFree(comm->gatheredSizes);
+    NCCLCHECK(ncclCudaFree((void*)comm->localSizes, comm->memManager));
+    CUDACHECK(hipFree(comm->gatheredSizes));
+    comm->localSizes = nullptr;
+    comm->gatheredSizes = nullptr;
   }
   // tempBuff is allocated per-communicator for direct ReduceScatter on gfx950.
   // It is owned by the communicator; free it during communicator teardown.
