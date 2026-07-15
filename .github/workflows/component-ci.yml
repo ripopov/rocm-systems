@@ -32,8 +32,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 2
-
+          fetch-depth: 0
       - name: Detect changed components
         id: configure
         run: |
@@ -44,7 +43,13 @@ jobs:
             NVIDIA=true
             WSL=true
           else
-            CHANGED_FILES=$(git diff --name-only "${BASE_REF}")
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              CHANGED_FILES="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
+            elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+              CHANGED_FILES="$(git diff --name-only "${{ github.event.before }}...${{ github.sha }}")"
+            else
+              CHANGED_FILES="$(git diff --name-only "${BASE_REF}")"
+            fi
             echo "Changed files:"
             echo "${CHANGED_FILES}"
 
@@ -52,7 +57,7 @@ jobs:
               NVIDIA=true
             fi
 
-            if echo "${CHANGED_FILES}" | grep -qE '^projects/(rocr-runtime|clr|hip|hip-tests)/|^\.github/workflows/(component-ci|rocr-runtime-wsl)\.yml|^shared/amdgpu-windows-interop/wkmi'; then
+            if echo "${CHANGED_FILES}" | grep -qE '^projects/(rocr-runtime|clr|hip|hip-tests)/|^\.github/workflows/(component-ci|rocr-runtime-wsl)\.yml|^shared/amdgpu-windows-interop/wkmi|^\.dvc(/|$)'; then
               WSL=true
             fi
           fi
