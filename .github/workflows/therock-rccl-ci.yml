@@ -2,6 +2,13 @@ name: TheRock CI for rccl
 
 on:
   workflow_dispatch:
+    inputs:
+      notify_email:
+        type: string
+        default: ""
+        description: "Email address for rocprof test notifications"
+  schedule:
+    - cron: '23 6 * * *'
 
 permissions:
   contents: read
@@ -40,15 +47,20 @@ jobs:
         id: rccl_check
         shell: bash
         run: |
-          echo "Changed files:"
-          git diff --name-only HEAD^
-
-          if git diff --name-only HEAD^ | grep -q '^projects/rccl/'; then
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "run_linux_ci=true" >> "$GITHUB_OUTPUT"
-            echo "RCCL changes detected"
+            echo "Schedule/dispatch event - always run CI"
           else
-            echo "run_linux_ci=false" >> "$GITHUB_OUTPUT"
-            echo "No RCCL changes detected"
+            echo "Changed files:"
+            git diff --name-only HEAD^
+
+            if git diff --name-only HEAD^ | grep -q '^projects/rccl/'; then
+              echo "run_linux_ci=true" >> "$GITHUB_OUTPUT"
+              echo "RCCL changes detected"
+            else
+              echo "run_linux_ci=false" >> "$GITHUB_OUTPUT"
+              echo "No RCCL changes detected"
+            fi
           fi
 
   therock-ci-linux:
@@ -67,6 +79,7 @@ jobs:
     with:
       amdgpu_families: ${{ matrix.amdgpu_family }}
       artifact_group: ${{ matrix.amdgpu_family }}
+      notify_email: ${{ inputs.notify_email || '' }}
       cmake_options: >
         -DTHEROCK_ENABLE_ALL=OFF
         -DTHEROCK_BUILD_TESTING=ON
