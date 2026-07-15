@@ -9,7 +9,7 @@ on:
         type: string
       package_version:
         type: string
-        required: true
+        default: ""
       cmake_options:
         type: string
       notify_email:
