@@ -18,8 +18,6 @@
 # COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-"""BDF string parsing and formatting unit tests."""
-
 """Driver-free unit tests for the amd-smi CLI exit-code model.
 
 Ported from the pre-migration ``tests/python_unittest/unit_tests.py`` monolith
@@ -924,6 +922,10 @@ class TestSetGpuGAllFailureGuards(unittest.TestCase):
         is what blocks a future `-g all` regression from shipping untested."""
         set_value = _load_set_value()
         options = _gpu_set_options(set_value)
+        self.assertTrue(
+            options,
+            "Test Regex issue: scraped zero GPU set options -- _gpu_set_options regex is stale",
+        )
         specced = set(_build_set_specs(set_value))
         self.assertEqual(
             options,
@@ -1212,6 +1214,10 @@ class TestResetGpuGAllFailureGuards(unittest.TestCase):
         here, blocking a future `-g all` reset regression from shipping."""
         reset = _load_reset()
         options = _reset_gpu_options(reset)
+        self.assertTrue(
+            options,
+            "Test Regex issue: scraped zero GPU reset options -- _reset_gpu_options regex is stale",
+        )
         specced = set(_build_reset_specs(reset))
         self.assertEqual(
             options,
