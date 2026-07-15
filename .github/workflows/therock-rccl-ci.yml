@@ -39,6 +39,13 @@ jobs:
           # We need the parent commit to do a diff
           fetch-depth: 2
 
+      - name: Checkout TheRock repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: "ROCm/TheRock"
+          path: "TheRock"
+          ref: d8e27dff1d165462ffa5bd50057a075b943c97c5 # 2026-07-13
+
       - name: "Configuring CI options"
         id: configure
         run: python .github/scripts/therock_configure_ci.py
