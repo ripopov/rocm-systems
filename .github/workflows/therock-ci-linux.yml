@@ -20,7 +20,6 @@ on:
         type: string
         default: "azure-linux-scale-rocm"
 
-
 permissions:
   contents: read
 
@@ -41,7 +40,6 @@ jobs:
       AMDGPU_FAMILIES: ${{ inputs.amdgpu_families }}
       TEATIME_FORCE_INTERACTIVE: 0
       AWS_SHARED_CREDENTIALS_FILE: /home/awsconfig/credentials.ini
-      THEROCK_REQUIRE_HIP_YAML_ENTRIES: 1
     steps:
       - name: "Checking out repository for rocm-systems"
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -51,7 +49,7 @@ jobs:
         with:
           repository: "ROCm/TheRock"
           path: "TheRock"
-          ref: 177bc45e201c996e1a780e3348fd49ca2c439b8e # 2026-06-25 commit
+          ref: d8e27dff1d165462ffa5bd50057a075b943c97c5 # 2026-07-13
 
       - name: Install python deps
         run: |
@@ -135,8 +133,9 @@ jobs:
   therock-test-linux:
     name: "Test"
     needs: [therock-build-linux]
+    # Skip tests if test_runs_on is empty (build-only mode) or gfx950-dcgpu (capacity)
     # TODO(TheRock#3288): Re-enable gfx950-dcgpu runners once we get more capacity
-    if: ${{ inputs.amdgpu_families != 'gfx950-dcgpu' }}
+    if: ${{ inputs.test_runs_on != '' && inputs.amdgpu_families != 'gfx950-dcgpu' }}
     uses: ./.github/workflows/therock-test-packages.yml
     with:
       projects_to_test: ${{ inputs.projects_to_test }}

@@ -21,6 +21,7 @@ test_categories:
       - "ArgCheckTest.*"
       - "DdaIpcEligibilityTest.*"
       - "CeAlltoAllvEligibilityTest.*"
+      - "DdaFabricEligibilityTest.*"
       - "NetSocketTests.*"
       - "Ipcsocket.*"
       - "XmlTest.*"
