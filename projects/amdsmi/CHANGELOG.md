@@ -99,9 +99,8 @@ Full documentation for amd_smi_lib is available at [https://rocm.docs.amd.com/pr
 ### Resolved Issues
 
 - **Fixed VRAM total reporting incorrect values in CPX/DPX/TPX/QPX compute-partition modes and on APUs**.  
-  - On partitioned GPUs (for example MI300A/MI300X), `amdsmi_get_gpu_memory_total()` / `rsmi_dev_memory_total_get()` could report the whole-device VRAM size divided evenly across partitions, ignoring reserved memory and disagreeing with the driver's actual per-partition allocation (for example TPX showing 42.66 GB and CPX showing 21.33 GB instead of the expected ~32 GB and ~16 GB per XCD).
-  - On APUs (for example gfx1151 / Strix Halo), the same functions could report only the small BIOS VRAM carveout (for example 0.5 GB) instead of the unified memory pool the GPU actually addresses (for example 110 GB).
-  - The VRAM total is now sourced from the KFD topology (`mem_banks`), which reports the true size, whenever the GPU is in a multi-partition compute mode (CPX/DPX/TPX/QPX), the sysfs read is unusable, or KFD reports more memory than sysfs (the APU carveout case).
+  - In multi-partition modes, `amdsmi_get_gpu_memory_total()` / `rsmi_dev_memory_total_get()` reported the whole-device VRAM split evenly across partitions instead of the driver's actual per-partition allocation; on APUs (for example gfx1151 / Strix Halo) they reported only the small BIOS VRAM carveout instead of the unified pool the GPU addresses.
+  - The VRAM total is now sourced from the KFD topology (`mem_banks`) in multi-partition modes, when the sysfs read is unusable, or on APUs where sysfs under-reports the carveout. Discrete and SPX GPUs are unaffected.
 
 - **Fixed `amd-smi set --power-cap` rejecting the minimum allowed value**.  
   - The lower bound is now inclusive, so setting the power cap to the exact minimum of the reported range (e.g. `210` when the range is 210-300W) succeeds instead of failing validation, matching the inclusive range shown in the error message.
