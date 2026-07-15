@@ -121,8 +121,11 @@ bool KFDAISTest::findNVMEPath(std::string &outPath) {
     for (const char* path : candidates) {
         struct stat st;
         if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            std::string testPath = std::string(path) + "kfdtest_ais_probe.tmp";
-            int fd = open(testPath.c_str(), O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+            std::string tmpl = std::string(path) + "kfdtest_ais_probe.XXXXXX";
+            std::vector<char> tmp(tmpl.begin(), tmpl.end());
+            tmp.push_back(0);
+            int fd = mkstemp(tmp.data());
+            std::string testPath(tmp.data());
             if (fd >= 0) {
                 bool isNVME = (checkIfFileIsOnNVME(fd) == 0);
                 close(fd);
@@ -277,8 +280,9 @@ int KFDAISTest::allocVRAMBuffers(int gpuNode, int numBuffers, size_t bufferSize,
         }
 
         if (hsakmt_is_dgpu()) {
+            HSAuint32 node = static_cast<HSAuint32>(gpuNode);
             ret = hsaKmtMapMemoryToGPUNodes(bufs[i], bufferSize, NULL,
-                       mapFlags, 1, reinterpret_cast<HSAuint32*>(&gpuNode));
+                       mapFlags, 1, &node);
             if (ret != HSAKMT_STATUS_SUCCESS) {
                 LOG() << "Failed to map VRAM buffer " << i << " to GPU" << std::endl;
                 freeVRAMBuffers(bufs, bufferSize);
