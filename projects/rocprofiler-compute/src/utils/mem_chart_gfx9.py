@@ -2,1270 +2,790 @@
 # SPDX-License-Identifier:  MIT
 
 """
-CDNA Memory Architecture Diagram - CLI/TUI Visualization
+CDNA Memory Architecture Diagram - CLI Visualization
 =============================================================================
 Memory chart renderer for CDNA-class GPUs (MI200, MI300, MI350 series).
 For RDNA3.5 (gfx1151) see mem_chart_gfx11.py.
+
+USAGE:
+    python mem_chart_gfx9.py [--data metrics.json] [--debug]
+        [--txt file.txt] [--svg file.svg]
+
+API:
+    normalize_mem_chart_metrics(metric_dict) -> flat ordered dict for UIs
+    plot_mem_chart(..., *, chart_title=...) -> str
+    format_mem_chart_heading(normal_unit, *, panel_id=300, section_label=...) -> str
+
+Metric dict keys must match the Memory Chart panel YAML for CDNA:
+
+    src/rocprof_compute_soc/analysis_configs/gfx9*/0300_memory_chart.yaml
+
+Use ``MEM_CHART_PANEL_METRIC_KEYS`` for the authoritative ordered list.
 """
 
+import argparse
+import json
+import pathlib
 import re
-from dataclasses import dataclass, field
-from decimal import Decimal
+from io import StringIO
 from typing import Any, Optional, Union
 
-from plotille import Canvas  # type: ignore
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from utils.mem_chart_common import (
+    COLORS,
+    _fmt_edge,
+    _safe_float_sum,
+    bar,
+    metric_line,
+)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_MEM_CHART_DEFAULT_ROWS: tuple[tuple[str, Union[int, float, None]], ...] = (
+    ("Wavefront Occupancy", 8),
+    ("Wave Life", 4200),
+    ("SALU", 1200),
+    ("SMEM", 45),
+    ("VALU", 3500),
+    ("Matrix Ops", 800),
+    ("VMEM", 220),
+    ("LDS", 150),
+    ("GWS", 0),
+    ("BR", 90),
+    ("Active CUs (deprecated)", 110),
+    ("Num CUs", 110),
+    ("VGPR", 64),
+    ("SGPR", 32),
+    ("LDS Allocation", 32768),
+    ("Scratch Allocation", 0),
+    ("Wavefronts", 16384),
+    ("Workgroups", 256),
+    ("Flat Read", 80),
+    ("Flat Write", 20),
+    ("Flat Atomic", 4),
+    ("Buffer Read", 3000),
+    ("Buffer Write", 400),
+    ("Buffer Atomic", 8),
+    ("LDS Req", 150),
+    ("LDS Util", 45),
+    ("LDS Latency", 28),
+    ("LDS Read", None),
+    ("LDS Write", None),
+    ("LDS Atomic", None),
+    ("VL1 Rd", 3200),
+    ("VL1 Wr", 480),
+    ("VL1 Atomic", 12),
+    ("VL1 Hit", 92),
+    ("VL1 Lat", 180),
+    ("VL1 Coalesce", 87),
+    ("VL1 Stall", 5),
+    ("VL1_L2 Rd", 256),
+    ("VL1_L2 Wr", 48),
+    ("VL1_L2 Atomic", 12),
+    ("sL1D Rd", 45),
+    ("sL1D Hit", 98),
+    ("sL1D Lat", 85),
+    ("sL1D_L2 Rd", 1),
+    ("sL1D_L2 Wr", 0),
+    ("sL1D_L2 Atomic", 0),
+    ("IL1 Fetch", 32),
+    ("IL1 Hit", 99),
+    ("IL1 Lat", 42),
+    ("IL1_L2 Rd", 1),
+    ("L2 Rd", 300),
+    ("L2 Wr", 52),
+    ("L2 Atomic", 12),
+    ("L2 Hit", 85),
+    ("L2 Rd Lat", 220),
+    ("L2 Wr Lat", 180),
+    ("Fabric_L2 Rd", 45),
+    ("Fabric_L2 Wr", 8),
+    ("Fabric_L2 Atomic", 1),
+    ("Fabric Rd Lat", 350),
+    ("Fabric Wr Lat", 280),
+    ("Fabric Atomic Lat", 310),
+    ("HBM Rd", 42),
+    ("HBM Wr", 7),
+)
+
+MEM_CHART_PANEL_METRIC_KEYS: tuple[str, ...] = tuple(
+    k for k, _ in _MEM_CHART_DEFAULT_ROWS
+)
+
+DEFAULT_SAMPLE_METRICS: dict[str, Union[int, float, None]] = dict(
+    _MEM_CHART_DEFAULT_ROWS
+)
 
 
-def make_format_spec(num: Union[int, float], align: str = ">") -> str:
-    """
-    Generate alignment string for a given input
-    """
-    if align not in ("<", ">", "^"):
-        raise ValueError("align must be one of '<', '>', or '^'")
-
-    # Convert to Decimal to preserve trailing zeros
-    d = Decimal(str(num))
-    sign, digits, exponent = d.as_tuple()
-
-    int_part = str(d.to_integral_value())
-
-    # Handle special cases where exponent is not an integer (NaN, Infinity, etc.)
-    if not isinstance(exponent, int):
-        # For special values, just return basic format
-        return f"{align}{str(num)}f"
-
-    if exponent >= 0:
-        # Pure integer, or float like 6.0, 6.00 (no decimal places)
-        if isinstance(num, int):
-            return f"{align}{int_part}"
-        else:
-            return f"{align}{str(num)}f"
-    else:
-        # Float with meaningful decimal digits
-        num_str = str(num)
-        # Remove negative sign if any for width only (format still respects sign)
-        if num_str.startswith("-"):
-            num_str = num_str[1:]
-        return f"{align}{num_str}f"
+# ---------------------------------------------------------------------------
+# Public API helpers
+# ---------------------------------------------------------------------------
 
 
-def is_value_valid(value: Union[int, float, str, None]) -> bool:
-    """
-    Check if a value is valid and display N/A if not
-    (to be valid, it needs to be not None, and be int or float)
-    """
-    if value is None:
-        return False
-
-    if not isinstance(value, (int, float)):
-        return False
-
-    return True
+def normalize_mem_chart_metrics(
+    metric_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize input to flat ordered dict with all panel keys present."""
+    return {k: metric_dict.get(k) for k in MEM_CHART_PANEL_METRIC_KEYS}
 
 
-def format_text(
-    value: Union[int, float, str, None],
-    key: Union[str, Union[int, float], None] = None,
-    mark_between: str = ": ",
-    post_description_with_space: str = "",
-    value_step_prec_rightalign: Union[int, float] = 0,
-    key_step_prec_leftalign: Union[int, float] = 0,
-    key_align: str = "<",
-    value_align: str = ">",
+def format_mem_chart_heading(
+    normal_unit: str,
+    *,
+    panel_id: int = 300,
+    section_label: str = "Memory Chart",
 ) -> str:
+    section_num = panel_id // 100
+    return f"{section_num}. {section_label} (Normalization: {normal_unit})"
+
+
+def get_sample_metrics() -> dict[str, Any]:
+    return dict(_MEM_CHART_DEFAULT_ROWS)
+
+
+# ---------------------------------------------------------------------------
+# Metric extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_metrics(metric_dict: dict[str, Any]) -> dict[str, Any]:
+    """Pull all needed values from the flat metric dict.
+
+    Keys that are absent from the metric dict return None, which the
+    rendering functions use to decide what to show — no architecture
+    string checks needed.
     """
-    Format a text string for canvas to display according to
-    input key-value pair and make proper alignment.
-    Uses scientific notation formatting when needed.
-    For invalid value, it displays N/A.
+    get = metric_dict.get
+    m: dict[str, Any] = {}
+
+    # Non-buffer (Flat) and Buffer request breakdown
+    m["flat_read"] = get("Flat Read")
+    m["flat_write"] = get("Flat Write")
+    m["flat_atomic"] = get("Flat Atomic")
+    m["buffer_read"] = get("Buffer Read")
+    m["buffer_write"] = get("Buffer Write")
+    m["buffer_atomic"] = get("Buffer Atomic")
+
+    # LDS
+    m["lds_req"] = get("LDS Req")
+    m["lds_util"] = get("LDS Util")
+    m["lds_lat"] = get("LDS Latency")
+    m["lds_read"] = get("LDS Read")
+    m["lds_write"] = get("LDS Write")
+    m["lds_atomic"] = get("LDS Atomic")
+
+    # Kernel→cache edges
+    m["smem_rd"] = get("sL1D Rd")
+    m["icache_rd"] = get("IL1 Fetch")
+
+    # L1 cache internals
+    m["vl1_hit"] = get("VL1 Hit")
+    m["sl1d_hit"] = get("sL1D Hit")
+    m["il1_hit"] = get("IL1 Hit")
+
+    # L1→L2 edges
+    m["vl1_l2_rd"] = get("VL1_L2 Rd")
+    m["vl1_l2_wr"] = get("VL1_L2 Wr")
+    m["vl1_l2_atomic"] = get("VL1_L2 Atomic")
+    m["sl1d_l2_rd"] = get("sL1D_L2 Rd")
+    m["il1_l2_rd"] = get("IL1_L2 Rd")
+
+    # L2
+    m["l2_hit"] = get("L2 Hit")
+    m["l2_rd"] = get("L2 Rd")
+    m["l2_wr"] = get("L2 Wr")
+    m["l2_atomic"] = get("L2 Atomic")
+
+    # L2→Fabric
+    m["fabric_l2_rd"] = get("Fabric_L2 Rd")
+    m["fabric_l2_wr"] = get("Fabric_L2 Wr")
+    m["fabric_l2_atomic"] = get("Fabric_L2 Atomic")
+    m["fabric_l2_wr_atomic"] = _safe_float_sum(
+        get("Fabric_L2 Wr"), get("Fabric_L2 Atomic")
+    )
+
+    # Fabric latency
+    m["fabric_rd_lat"] = get("Fabric Rd Lat")
+    m["fabric_wr_lat"] = get("Fabric Wr Lat")
+    m["fabric_atomic_lat"] = get("Fabric Atomic Lat")
+
+    # HBM
+    m["hbm_rd"] = get("HBM Rd")
+    m["hbm_wr"] = get("HBM Wr")
+
+    return m
+
+
+# ---------------------------------------------------------------------------
+# Diagram building
+# ---------------------------------------------------------------------------
+
+
+def _make_arrows(length: int = 8) -> dict[str, str]:
+    return {
+        "left": "<" + "─" * length,
+        "right": "─" * length + ">",
+        "both": "<" + "─" * (length - 1) + ">",
+    }
+
+
+def _build_kernel_panel() -> Panel:
+    return Panel(
+        "\n" * 6 + "[dim]Shader Core[/dim]\n[dim]Wave Execution[/dim]",
+        title=f"[bold {COLORS['kernel']}]Kernel[/bold {COLORS['kernel']}]",
+        border_style=COLORS["kernel"],
+        width=14,
+        height=30,
+    )
+
+
+def _build_request_edges(
+    m: dict[str, Any],
+    arrows: dict[str, str],
+) -> Text:
+    """Edges from Kernel to Requests column."""
+    c_rd = COLORS["read"]
+    c_wr = COLORS["write"]
+    c_at = COLORS["atomic"]
+    ka_l = arrows["left"]
+    ka_r = arrows["right"]
+    ka_b = arrows["both"]
+
+    lines = [
+        "[white]Non-buffer[/white]",
+        f"[{c_rd}]{_fmt_edge('Read', m['flat_read'])}[/{c_rd}]",
+        f"[{c_rd}]{ka_l}[/{c_rd}]",
+        f"[{c_wr}]{_fmt_edge('Write', m['flat_write'])}[/{c_wr}]",
+        f"[{c_wr}]{ka_r}[/{c_wr}]",
+        f"[{c_at}]{_fmt_edge('Atomic', m['flat_atomic'])}[/{c_at}]",
+        f"[{c_at}]{ka_b}[/{c_at}]",
+        "[white]Buffer[/white]",
+        f"[{c_rd}]{_fmt_edge('Read', m['buffer_read'])}[/{c_rd}]",
+        f"[{c_rd}]{ka_l}[/{c_rd}]",
+        f"[{c_wr}]{_fmt_edge('Write', m['buffer_write'])}[/{c_wr}]",
+        f"[{c_wr}]{ka_r}[/{c_wr}]",
+        f"[{c_at}]{_fmt_edge('Atomic', m['buffer_atomic'])}[/{c_at}]",
+        f"[{c_at}]{ka_b}[/{c_at}]",
+        "",
+    ]
+
+    # LDS edges — data-driven: Rd/Wr/Atomic when available, else single Instr
+    if m["lds_read"] is not None:
+        lines.append("[white]LDS[/white]")
+        lines.append(f"[{c_rd}]{_fmt_edge('Read', m['lds_read'])}[/{c_rd}]")
+        lines.append(f"[{c_rd}]{ka_l}[/{c_rd}]")
+        lines.append(f"[{c_wr}]{_fmt_edge('Write', m['lds_write'])}[/{c_wr}]")
+        lines.append(f"[{c_wr}]{ka_r}[/{c_wr}]")
+        lines.append(f"[{c_at}]{_fmt_edge('Atomic', m['lds_atomic'])}[/{c_at}]")
+        lines.append(f"[{c_at}]{ka_b}[/{c_at}]")
+    else:
+        lines.append("[white]LDS[/white]")
+        lines.append(f"[{c_rd}]{_fmt_edge('Instr', m['lds_req'])}[/{c_rd}]")
+        lines.append(f"[{c_rd}]{ka_b}[/{c_rd}]")
+        lines.append("")
+        lines.append("")
+        lines.append("")
+        lines.append("")
+
+    lines.append("")
+    lines.append("[white]SMEM[/white]")
+    lines.append(f"[{c_rd}]{_fmt_edge('Read', m['smem_rd'])}[/{c_rd}]")
+    lines.append(f"[{c_rd}]{ka_l}[/{c_rd}]")
+    lines.append("[white]ICACHE[/white]")
+    lines.append(f"[{c_rd}]{_fmt_edge('Read', m['icache_rd'])}[/{c_rd}]")
+    lines.append(f"[{c_rd}]{ka_l}[/{c_rd}]")
+
+    return Text.from_markup("\n".join(lines))
+
+
+def _build_l1_stack(m: dict[str, Any]) -> Table:
+    """Build vertically stacked L1 cache panels: VL1D, LDS, sL1D, L1I."""
+    c_bl = COLORS["block"]
+
+    vl1_panel = Panel(
+        f"{metric_line('Hit', m['vl1_hit'], '%', COLORS['hit'])}\n"
+        f"[dim]{bar(m['vl1_hit'])}[/dim]",
+        title=f"[bold {c_bl}]VL1D[/bold {c_bl}]",
+        border_style=c_bl,
+        width=18,
+        height=7,
+    )
+
+    lds_panel = Panel(
+        f"{metric_line('Util', m['lds_util'], '%', COLORS['util'])}\n"
+        f"[dim]{bar(m['lds_util'])}[/dim]\n"
+        f"{metric_line('Lat', m['lds_lat'], ' cyc', COLORS['stall'])}",
+        title=f"[bold {COLORS['lds']}]LDS[/bold {COLORS['lds']}]",
+        border_style=COLORS["lds"],
+        width=18,
+        height=8,
+    )
+
+    sl1d_panel = Panel(
+        f"{metric_line('Hit', m['sl1d_hit'], '%', COLORS['hit'])}\n"
+        f"[dim]{bar(m['sl1d_hit'])}[/dim]",
+        title=f"[bold {c_bl}]sL1D[/bold {c_bl}]",
+        border_style=c_bl,
+        width=18,
+        height=5,
+    )
+
+    l1i_panel = Panel(
+        f"{metric_line('Hit', m['il1_hit'], '%', COLORS['hit'])}\n"
+        f"[dim]{bar(m['il1_hit'])}[/dim]",
+        title=f"[bold {c_bl}]L1I[/bold {c_bl}]",
+        border_style=c_bl,
+        width=18,
+        height=5,
+    )
+
+    stack = Table.grid(padding=0)
+    stack.add_column()
+    stack.add_row(vl1_panel)
+    stack.add_row(lds_panel)
+    stack.add_row(sl1d_panel)
+    stack.add_row(l1i_panel)
+    return stack
+
+
+def _build_l1_l2_edges(
+    m: dict[str, Any],
+    arrows: dict[str, str],
+) -> Text:
+    """L1→L2 edge column: VL1D Rd/Wr/Atomic, sL1D Rd, L1I Rd."""
+    c_rd = COLORS["read"]
+    c_wr = COLORS["write"]
+    c_at = COLORS["atomic"]
+    sa_l = arrows["left"]
+    sa_r = arrows["right"]
+
+    lines = [
+        "[white]L1-L2[/white]",
+        f"[{c_rd}]{_fmt_edge('Read', m['vl1_l2_rd'])}[/{c_rd}]",
+        f"[{c_rd}]{sa_l}[/{c_rd}]",
+        f"[{c_wr}]{_fmt_edge('Write', m['vl1_l2_wr'])}[/{c_wr}]",
+        f"[{c_wr}]{sa_r}[/{c_wr}]",
+        f"[{c_at}]{_fmt_edge('Atomic', m['vl1_l2_atomic'])}[/{c_at}]",
+        f"[{c_at}]{arrows['both']}[/{c_at}]",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "[white]sL1D-L2[/white]",
+        f"[{c_rd}]{_fmt_edge('Read', m['sl1d_l2_rd'])}[/{c_rd}]",
+        f"[{c_rd}]{sa_l}[/{c_rd}]",
+        "[white]L1I-L2[/white]",
+        f"[{c_rd}]{_fmt_edge('Read', m['il1_l2_rd'])}[/{c_rd}]",
+        f"[{c_rd}]{sa_l}[/{c_rd}]",
+    ]
+    return Text.from_markup("\n".join(lines))
+
+
+def _build_l2_panel(m: dict[str, Any]) -> Panel:
+    c_bl = COLORS["block"]
+    return Panel(
+        f"{metric_line('Hit', m['l2_hit'], '%', COLORS['hit'])}\n"
+        f"[dim]{bar(m['l2_hit'])}[/dim]\n"
+        "\n"
+        f"{metric_line('Rd', m['l2_rd'], '', COLORS['read'])}\n"
+        f"{metric_line('Wr', m['l2_wr'], '', COLORS['write'])}\n"
+        f"{metric_line('Atomic', m['l2_atomic'], '', COLORS['atomic'])}",
+        title=f"[bold {c_bl}]L2[/bold {c_bl}]",
+        border_style=c_bl,
+        width=18,
+        height=30,
+    )
+
+
+def _build_l2_fabric_edges(
+    m: dict[str, Any],
+    arrows: dict[str, str],
+) -> Text:
+    """L2↔Fabric edges: Read and Write/Atomic (combined per PNG)."""
+    c_rd = COLORS["read"]
+    c_wr = COLORS["write"]
+    sa_l = arrows["left"]
+    sa_r = arrows["right"]
+
+    lines = [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "[white]L2↔Fabric[/white]",
+        f"[{c_rd}]{_fmt_edge('Read', m['fabric_l2_rd'])}[/{c_rd}]",
+        f"[{c_rd}]{sa_l}[/{c_rd}]",
+        f"[{c_wr}]{_fmt_edge('Wr/At', m['fabric_l2_wr_atomic'])}[/{c_wr}]",
+        f"[{c_wr}]{sa_r}[/{c_wr}]",
+        "",
+    ]
+    return Text.from_markup("\n".join(lines))
+
+
+def _build_data_fabric_panel(m: dict[str, Any]) -> Panel:
+    content = (
+        "\n\n"
+        f"[dim]Latency (cycles)[/dim]\n"
+        f"  {metric_line('Rd', m['fabric_rd_lat'], ' cyc', COLORS['read'])}\n"
+        f"  {metric_line('Wr', m['fabric_wr_lat'], ' cyc', COLORS['write'])}\n"
+        f"  {metric_line('At', m['fabric_atomic_lat'], ' cyc', COLORS['atomic'])}"
+    )
+    return Panel(
+        content,
+        title="[bold bright_magenta]Data Fabric[/bold bright_magenta]",
+        border_style="bright_magenta",
+        width=22,
+        height=30,
+    )
+
+
+def _build_fabric_mem_edges(
+    m: dict[str, Any],
+    arrows: dict[str, str],
+) -> Text:
+    """Fabric→MALL/HBM edges."""
+    c_rd = COLORS["read"]
+    c_wr = COLORS["write"]
+    sa_l = arrows["left"]
+    sa_r = arrows["right"]
+
+    lines = [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        f"[{c_rd}]{_fmt_edge('Rd', m['hbm_rd'])}[/{c_rd}]",
+        f"[{c_rd}]{sa_l}[/{c_rd}]",
+        f"[{c_wr}]{_fmt_edge('Wr', m['hbm_wr'])}[/{c_wr}]",
+        f"[{c_wr}]{sa_r}[/{c_wr}]",
+        "",
+    ]
+    return Text.from_markup("\n".join(lines))
+
+
+def _build_mall_panel(m: dict[str, Any]) -> Panel:
+    c_bl = COLORS["block"]
+    return Panel(
+        "\n\n[dim]Rd/Wr/Atomic BW\nTo Device-Mem[/dim]",
+        title=f"[bold {c_bl}]MALL[/bold {c_bl}]",
+        border_style="indian_red",
+        width=18,
+        height=30,
+    )
+
+
+def _build_umc_panel() -> Panel:
+    return Panel(
+        "",
+        title=f"[bold {COLORS['block']}]UMC[/bold {COLORS['block']}]",
+        border_style=COLORS["block"],
+        width=8,
+        height=30,
+    )
+
+
+def _build_hbm_panel() -> Panel:
+    return Panel(
+        "\n\n[bold bright_green]HBM[/bold bright_green]",
+        title=f"[bold {COLORS['block']}]HBM[/bold {COLORS['block']}]",
+        border_style="bright_yellow",
+        width=10,
+        height=30,
+    )
+
+
+def _build_xgmi_row(console: Console) -> None:
+    """Render the xGMI block above the main diagram."""
+    xgmi_panel = Panel(
+        "[dim]XGMI (i.e., to Peer GPU)[/dim]",
+        border_style="bright_yellow",
+        width=30,
+        height=3,
+    )
+    xgmi_layout = Table.grid(padding=0)
+    xgmi_layout.add_column(width=90)
+    xgmi_layout.add_column()
+    xgmi_layout.add_row("", xgmi_panel)
+    console.print(xgmi_layout)
+
+    arrow_lines = Text.from_markup(
+        " " * 100
+        + "[dim]|^              Rd/Wr/Atomic BW[/dim]\n"
+        + " " * 100
+        + "[dim]||              to Infinity Fabric[/dim]\n"
+        + " " * 100
+        + "[dim]||[/dim]"
+    )
+    console.print(arrow_lines)
+
+
+def _build_pcie_row(console: Console) -> None:
+    """Render the PCIe block below the main diagram."""
+    arrow_lines = Text.from_markup(
+        " " * 100
+        + "[dim]||[/dim]\n"
+        + " " * 100
+        + "[dim]||              Rd/Wr/Atomic BW[/dim]\n"
+        + " " * 100
+        + "[dim]V|              to PCIe[/dim]"
+    )
+    console.print(arrow_lines)
+
+    pcie_panel = Panel(
+        "[dim]PCIe (i.e., to CPU or Non-XGMI connected GPU)[/dim]",
+        border_style="dark_olive_green3",
+        width=50,
+        height=3,
+    )
+    pcie_layout = Table.grid(padding=0)
+    pcie_layout.add_column(width=80)
+    pcie_layout.add_column()
+    pcie_layout.add_row("", pcie_panel)
+    console.print(pcie_layout)
+
+
+def _print_scope_bar(console: Console) -> None:
+    gpu_label = "[dim]GPU (XCD)[/dim]"
+    fabric_label = "[dim]Fabric / Memory[/dim]"
+    console.print(
+        f"|{'─' * 60} {gpu_label} {'─' * 20}|{'─' * 10} {fabric_label} {'─' * 10}|"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main diagram assembly
+# ---------------------------------------------------------------------------
+
+
+def create_mem_chart_diagram(
+    metric_dict: dict[str, Any],
+    console: Console,
+    show_debug: bool = False,
+    chart_title: str = "",
+) -> None:
+    """Create the CDNA memory diagram matching the reference PNG layout."""
+    m = _extract_metrics(metric_dict)
+    arrows = _make_arrows()
+
+    console.print()
+    if chart_title:
+        console.print(f"[bold]{chart_title}[/bold]")
+
+    # xGMI block (above main diagram)
+    _build_xgmi_row(console)
+    console.print()
+    _print_scope_bar(console)
+    console.print()
+
+    # Main diagram row
+    kernel = _build_kernel_panel()
+    req_edges = _build_request_edges(m, arrows)
+    l1_stack = _build_l1_stack(m)
+    l1_l2_edges = _build_l1_l2_edges(m, arrows)
+    l2 = _build_l2_panel(m)
+    l2_fab_edges = _build_l2_fabric_edges(m, arrows)
+    fabric = _build_data_fabric_panel(m)
+    fab_mem_edges = _build_fabric_mem_edges(m, arrows)
+    mall = _build_mall_panel(m)
+    umc = _build_umc_panel()
+    hbm = _build_hbm_panel()
+
+    main_layout = Table.grid(padding=0)
+    for _ in range(11):
+        main_layout.add_column()
+
+    main_layout.add_row(
+        kernel,
+        req_edges,
+        l1_stack,
+        l1_l2_edges,
+        l2,
+        l2_fab_edges,
+        fabric,
+        fab_mem_edges,
+        mall,
+        umc,
+        hbm,
+    )
+
+    console.print(main_layout)
+    console.print()
+
+    # PCIe block (below main diagram)
+    _build_pcie_row(console)
+    console.print()
+
+    # Legend
+    legend = (
+        f"[dim]Legend:[/dim] "
+        f"[{COLORS['read']}]<────[/{COLORS['read']}] Read  "
+        f"[{COLORS['write']}]────>[/{COLORS['write']}] Write  "
+        f"[{COLORS['atomic']}]<───>[/{COLORS['atomic']}] Atomic  "
+        f"[{COLORS['util']}]█[/{COLORS['util']}] Util  "
+        f"[{COLORS['hit']}]█[/{COLORS['hit']}] Hit%  "
+        f"[{COLORS['stall']}]█[/{COLORS['stall']}] Stall"
+    )
+    console.print(legend)
+    console.print()
+
+    if show_debug:
+        console.print("[dim]Architecture Notes (CDNA):[/dim]")
+        console.print("  VL1D: Per-CU vector data cache (Buffer/Non-buffer requests)")
+        console.print("  LDS: Local Data Share, on-CU scratchpad")
+        console.print("  sL1D: Per-CU scalar data cache (SMEM requests)")
+        console.print("  L1I: Per-CU instruction cache (ICACHE requests)")
+        console.print("  L2 (TCC): Shared last-level cache")
+        console.print("  Data Fabric: Infinity Fabric interconnect")
+        console.print("  MALL: Mid-level Address Lookup Layer (MI300+)")
+        console.print("  UMC: Unified Memory Controller")
+        console.print("  HBM: High Bandwidth Memory")
+        console.print(
+            "  xGMI: Inter-GPU link (MI350 has individual counters;"
+            " earlier cards use 'traffic to remote')"
+        )
+        console.print(
+            "  PCIe: Host/non-xGMI link (MI350 has individual counters;"
+            " earlier cards use 'traffic to remote')"
+        )
+        console.print()
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+def plot_mem_chart(
+    normal_unit: str,
+    metric_dict: dict[str, Any],
+    *,
+    chart_title: Optional[str] = None,
+) -> str:
+    """Plot the CDNA memory chart and return as string.
+
+    ``chart_title``: full heading line; if omitted, uses
+    ``format_mem_chart_heading`` with ``panel_id=300``.
     """
+    flat = normalize_mem_chart_metrics(metric_dict)
+    resolved_heading = (
+        format_mem_chart_heading(normal_unit, panel_id=300)
+        if chart_title is None
+        else chart_title
+    )
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=True, width=240, height=80)
+    create_mem_chart_diagram(
+        flat,
+        console,
+        show_debug=False,
+        chart_title=resolved_heading,
+    )
+    return buf.getvalue()
 
-    # Step 1: Build format spec using make_format_spec
-    value_format = make_format_spec(value_step_prec_rightalign, value_align)
 
-    if is_value_valid(value):
-        value_str = f"{value:{value_format}}"
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def _render_to_plain_text(
+    metrics: dict[str, Any],
+    heading: str,
+    show_debug: bool,
+) -> str:
+    """Render chart to plain text (no ANSI escape codes)."""
+    buf = StringIO()
+    console = Console(
+        file=buf,
+        force_terminal=False,
+        width=240,
+        height=80,
+    )
+    create_mem_chart_diagram(
+        metrics,
+        console,
+        show_debug=show_debug,
+        chart_title=heading,
+    )
+    raw = buf.getvalue()
+    return re.sub(r"\x1b\[[0-9;]*m", "", raw)
+
+
+def main() -> None:
+    arg_parser = argparse.ArgumentParser(
+        description="CDNA Memory Chart - CLI",
+    )
+    arg_parser.add_argument(
+        "--data",
+        "-d",
+        help="JSON file with metrics data",
+    )
+    arg_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show debug info",
+    )
+    arg_parser.add_argument(
+        "--norm",
+        default="per_kernel",
+        help="Normalization unit",
+    )
+    arg_parser.add_argument("--txt", help="Write plain text to file")
+    arg_parser.add_argument("--svg", help="Write SVG to file")
+    args = arg_parser.parse_args()
+
+    if args.data:
+        with pathlib.Path(args.data).open(encoding="utf-8") as f:
+            metrics = json.load(f)
     else:
-        match = re.search(r"[<>=^](\d+)", value_format)
-        width = int(match.group(1)) if match else 6
-
-        # Use same alignment as in value_format (first char)
-        align = value_format[0]
-        value_str = f"{'N/A':{align}{width}}"
-
-    if key is not None:
-        key_format = make_format_spec(key_step_prec_leftalign, key_align)
-        key_str = f"{key:{key_format}}" if isinstance(key, (int, float)) else str(key)
-        result_str_no_unit = f"{key_str}{mark_between}{value_str}"
-    else:
-        result_str_no_unit = f"{value_str}"
-
-    unit_string = post_description_with_space if "N/A" not in value_str else ""
-    return result_str_no_unit + unit_string
-
-
-# A basic rect frame for any block or group of wires where all its elements should
-# be within this range, except: (a) the label(title) might be on the top of it,
-# (b) some wires around it don't have to be grouped specifically.
-@dataclass
-class RectFrame:
-    label: str
-    x_min: float = 0.0
-    x_max: float = 0.0
-    y_min: float = 1.0
-    y_max: float = 1.0
-
-
-# Instr Buff Block
-@dataclass
-class InstrBuff(RectFrame):
-    wave_occupancy: Optional[int] = None
-    wave_life: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-
-        canvas.rect(self.x_min, self.y_min, self.x_max - 2.0, self.y_max - 1.0)
-        canvas.rect(
-            self.x_min + 1.0, self.y_min + 0.5, self.x_max - 1.0, self.y_max - 0.5
-        )
-        canvas.rect(self.x_min + 2.0, self.y_min + 1.0, self.x_max, self.y_max)
-
-        canvas.rect(
-            self.x_min + 4.0, self.y_max - 3.5, self.x_max - 4.0, self.y_max - 2.0
-        )
-        canvas.text(self.x_min + 5.0, self.y_max - 3.0, r"Wave   0 Instr Buf")
-
-        canvas.rect(
-            self.x_min + 4.0, self.y_max - 7.5, self.x_max - 4.0, self.y_max - 6.0
-        )
-        canvas.text(self.x_min + 5.0, self.y_max - 7.0, r"Wave N-1 Instr Buf")
-
-        canvas.text(self.x_min + 7.0, self.y_min + 5.0, r"Wave Occupancy")
-        canvas.text(
-            self.x_min + 10.0,
-            self.y_min + 4.0,
-            format_text(value=self.wave_occupancy, value_step_prec_rightalign=3.0),
-            color="yellow",
-        )
-        canvas.text(self.x_min + 7.0, self.y_min + 3.0, r"Wave Life")
-        canvas.text(
-            self.x_min + 8.0,
-            self.y_min + 2.0,
-            format_text(value=self.wave_life, value_step_prec_rightalign=5.0),
-            color="yellow",
-        )
-
-
-# Wires between Instr Buff and Instr Dispatch
-@dataclass
-class Wire_InstrBuff_InstrDispatch(RectFrame):
-    def draw(self, canvas: Canvas) -> None:
-        # TODO: finer wires for connections
-        canvas.line(self.x_min + 2, self.y_min, self.x_min + 2, self.y_max)
-        canvas.line(self.x_max, self.y_min + 1.5, self.x_max, self.y_max - 1.5)
-        canvas.line(self.x_min + 2, self.y_min, self.x_max, self.y_min + 1.5)
-        canvas.line(self.x_min + 2, self.y_max, self.x_max - 0.5, self.y_max - 1.5)
-
-
-# Instr Dispatch Block
-@dataclass
-class InstrDispatch(RectFrame):
-    top_rect_x_min: float = 0.0
-    top_rect_x_max: float = 0.0
-    top_rect_y_min: float = 0.0
-    top_rect_y_max: float = 0.0
-    text_x_offset: float = 1.0
-    text_y_offset: float = 0.5
-    line_y_offset: float = 0.5
-    rect_y_offset: float = 3.0
-    instrs: dict[str, int] = field(default_factory=dict)
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-
-        self.top_rect_x_min = self.x_min + 2.0
-        self.top_rect_x_max = self.top_rect_x_min + 14.0
-        self.top_rect_y_min = self.y_max - 1.5
-        self.top_rect_y_max = self.y_max
-
-        for i, (k, v) in enumerate(self.instrs.items()):
-            text = format_text(
-                key=k,
-                value=v,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-                key_align=">",
-                value_align="<",
-            )
-            canvas.text(
-                self.top_rect_x_min + self.text_x_offset,
-                self.top_rect_y_min - self.rect_y_offset * i + self.text_y_offset,
-                text,
-            )
-            canvas.text(
-                self.top_rect_x_min - 2,
-                self.top_rect_y_min - self.rect_y_offset * i,
-                "------------------>",
-            )
-
-
-# Exec Block
-@dataclass
-class Exec(RectFrame):
-    active_cus: int = 0
-    num_cus: int = 0
-    vgprs: int = 0
-    sgprs: int = 0
-    lds_alloc: int = 0
-    scratch_alloc: int = 0
-    wavefronts: int = 0
-    workgroups: int = 0
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(self.x_min + 2.0, self.y_max - 2.0, "Active CUs")
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 3.0,
-            format_text(
-                key=self.active_cus,
-                value=self.num_cus,
-                key_step_prec_leftalign=3.0,
-                value_step_prec_rightalign=3.0,
-                key_align=">",
-                value_align="<",
-            ),
-            color="yellow",
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 7.0, self.x_max - 2.0, self.y_max - 5.0
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 6.0,
-            format_text(
-                key="RVGPRseq",
-                value=self.vgprs,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=5,
-            ),
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 10.0, self.x_max - 2.0, self.y_max - 8.0
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 9.0,
-            format_text(
-                key="SGPRs",
-                value=self.sgprs,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=5.0,
-            ),
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 15.0, self.x_max - 2.0, self.y_max - 12.0
-        )
-        canvas.text(self.x_min + 4.0, self.y_max - 13.0, "LDS Alloc:")
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 14.0,
-            format_text(
-                value=self.lds_alloc,
-                value_step_prec_rightalign=13.0,
-            ),
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 19.0, self.x_max - 2.0, self.y_max - 16.0
-        )
-        canvas.text(self.x_min + 4.0, self.y_max - 17.0, "Scratch Alloc:")
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 18.0,
-            format_text(
-                value=self.scratch_alloc,
-                value_step_prec_rightalign=13.0,
-            ),
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 24.0, self.x_max - 2.0, self.y_max - 21.0
-        )
-        canvas.text(self.x_min + 4.0, self.y_max - 22.0, "Wavefronts:")
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 23.0,
-            format_text(
-                value=self.wavefronts,
-                value_step_prec_rightalign=13.0,
-            ),
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 28.0, self.x_max - 2.0, self.y_max - 25.0
-        )
-        canvas.text(self.x_min + 4.0, self.y_max - 26.0, "Workgroups:")
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 27.0,
-            format_text(
-                value=self.workgroups,
-                value_step_prec_rightalign=13.0,
-            ),
-        )
-
-
-# Wires between Exec block and GDS, LDS, Vector L1 cache, Scalar L1D Cache
-@dataclass
-class Wire_E_GLVS(RectFrame):
-    text_x_offset: float = 3.0
-
-    lds_req: Optional[int] = None
-    vl1_rd: Optional[int] = None
-    vl1_wr: Optional[int] = None
-    vl1_atomic: Optional[int] = None
-    sl1_rd: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 2.0,
-            format_text(
-                key="Req",
-                value=self.lds_req,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 3.0, "<---------------"
-        )
-
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 10.0,
-            format_text(
-                key="Rd",
-                value=self.vl1_rd,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 11.0, "<---------------"
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 12.0,
-            format_text(
-                key="Wr",
-                value=self.vl1_wr,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 13.0, "--------------->"
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 14.0,
-            format_text(
-                key="Atomic",
-                value=self.vl1_atomic,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 15.0, "<-------------->"
-        )
-
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 22.0,
-            format_text(
-                key="Rd",
-                value=self.sl1_rd,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 23.0, "<---------------"
-        )
-
-
-# Wire between Instr Buff and Instr L1 Cache
-@dataclass
-class Wire_InstrBuff_IL1Cache(RectFrame):
-    il1_fetch: int = 0
-
-    def draw(self, canvas: Canvas) -> None:
-        end_col = int(self.y_max - self.y_min)
-        canvas.text(self.x_min, self.y_max - 1, "^")
-        for i in range(2, end_col):
-            canvas.text(self.x_min, self.y_max - i, "|")
-        canvas.text(
-            self.x_min + 27,
-            self.y_max - end_col + 1,
-            format_text(
-                key="Fetch",
-                value=self.il1_fetch,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min, self.y_max - end_col, "-" * (int(self.x_max - self.x_min))
-        )
-
-
-# GDS Block
-@dataclass
-class GDS(RectFrame):
-    gws: Optional[int] = None
-    latency: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_min + 2.5, self.x_max - 2.0, self.y_max - 1.0
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 2.0,
-            format_text(
-                key="GWS",
-                value=self.gws,
-                key_step_prec_leftalign=4,
-                value_step_prec_rightalign=4.0,
-                post_description_with_space=" cycles",
-            ),
-        )
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_min + 0.5, self.x_max - 2.0, self.y_min + 2.0
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 4.0,
-            format_text(
-                key="Lat",
-                value=self.latency,
-                key_step_prec_leftalign=4,
-                value_step_prec_rightalign=4.0,
-                post_description_with_space=" cycles",
-            ),
-        )
-
-
-# LDS Block
-@dataclass
-class LDS(RectFrame):
-    util: Optional[int] = None
-    latency: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 2.0,
-            format_text(
-                key="Util",
-                value=self.util,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" %",
-            ),
-        )
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 4.0,
-            format_text(
-                key="Lat",
-                value=self.latency,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" cycles",
-            ),
-        )
-
-
-# Vector L1 Cache Block
-@dataclass
-class VectorL1Cache(RectFrame):
-    hit: Optional[int] = None
-    latency: Optional[int] = None
-    coales: Optional[int] = None
-    stall: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 2.0,
-            format_text(
-                key="Hit",
-                value=self.hit,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" %",
-            ),
-        )
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 4.0,
-            format_text(
-                key="Lat",
-                value=self.latency,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" cycles",
-            ),
-        )
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 6.0,
-            format_text(
-                key="Coales",
-                value=self.coales,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" %",
-            ),
-        )
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 8.0,
-            format_text(
-                key="Stall",
-                value=self.stall,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" cycles",
-            ),
-        )
-
-
-# Scalar L1D Cache
-@dataclass
-class ScalarL1DCache(RectFrame):
-    hit: Optional[int] = None
-    latency: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 2.0,
-            format_text(
-                key="Hit",
-                value=self.hit,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" %",
-            ),
-        )
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 4.0,
-            format_text(
-                key="Lat",
-                value=self.latency,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6,
-                post_description_with_space=" cycles",
-            ),
-        )
-
-
-# Instr L1 Cache
-@dataclass
-class InstrL1Cache(RectFrame):
-    hit: Optional[int] = None
-    latency: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 2.0,
-            format_text(
-                key="Hit",
-                value=self.hit,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" %",
-            ),
-        )
-        canvas.text(
-            self.x_min + 2.0,
-            self.y_max - 4.0,
-            format_text(
-                key="Lat",
-                value=self.latency,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6,
-                post_description_with_space=" cycles",
-            ),
-        )
-
-
-# Wires between Vector L1 cache, Scalar L1D Cache, Instr L1 cache and L2 Cache
-@dataclass
-class Wires_L1_L2(RectFrame):
-    text_v_x_offset: float = 0.0
-
-    vl1_l2_rd: Optional[int] = None
-    vl1_l2_wr: Optional[int] = None
-    vl1_l2_atomic: Optional[int] = None
-    sl1_l2_rd: Optional[int] = None
-    sl1_l2_wr: Optional[int] = None
-    sl1_l2_atomic: Optional[int] = None
-    il1_l2_req: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(
-            self.x_min + self.text_v_x_offset,
-            self.y_max - 2.0,
-            format_text(
-                key="Rd",
-                value=self.vl1_l2_rd,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_v_x_offset - 2, self.y_max - 3.0, "<---------------"
-        )
-        canvas.text(
-            self.x_min + self.text_v_x_offset,
-            self.y_max - 4.0,
-            format_text(
-                key="Wr",
-                value=self.vl1_l2_wr,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_v_x_offset - 2, self.y_max - 5.0, "--------------->"
-        )
-        canvas.text(
-            self.x_min + self.text_v_x_offset,
-            self.y_max - 6.0,
-            format_text(
-                key="Atomic",
-                value=self.vl1_l2_atomic,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_v_x_offset - 2, self.y_max - 7.0, "<-------------->"
-        )
-
-        canvas.text(
-            self.x_min,
-            self.y_max - 12.0,
-            format_text(
-                key="Rd",
-                value=self.sl1_l2_rd,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(self.x_min - 2, self.y_max - 13.0, "<---------------")
-        canvas.text(
-            self.x_min,
-            self.y_max - 14.0,
-            format_text(
-                key="Wr",
-                value=self.sl1_l2_wr,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(self.x_min - 2, self.y_max - 15.0, "--------------->")
-        canvas.text(
-            self.x_min,
-            self.y_max - 16.0,
-            format_text(
-                key="Atomic",
-                value=self.sl1_l2_atomic,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(self.x_min - 2, self.y_max - 17.0, "<-------------->")
-
-        canvas.text(
-            self.x_min,
-            self.y_max - 22.0,
-            format_text(
-                key="Req",
-                value=self.il1_l2_req,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(self.x_min - 2, self.y_max - 23.0, "<---------------")
-
-
-# L2 Cache
-@dataclass
-class L2Cache(RectFrame):
-    rd: Optional[int] = None
-    wr: Optional[int] = None
-    atomic: Optional[int] = None
-    hit: Optional[int] = None
-    rd_lat: Optional[int] = None
-    wr_lat: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min, self.y_max + 1.0, self.label)
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 5.0, self.x_max - 2.0, self.y_max - 3.0
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 4.0,
-            format_text(
-                key="Hit",
-                value=self.hit,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-                post_description_with_space=" %",
-            ),
-        )
-
-        canvas.text(self.x_min + 2.0, self.y_max - 7.0, "Request")
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 16.0, self.x_max - 2.0, self.y_max - 7.5
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 10.0,
-            format_text(
-                key="Rd",
-                value=self.rd,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 12.0,
-            format_text(
-                key="Wr",
-                value=self.wr,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 14.0,
-            format_text(
-                key="Atomic",
-                value=self.atomic,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-            ),
-        )
-
-        canvas.text(self.x_min + 2.0, self.y_max - 19.0, "Latency (cycles)")
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 25.0, self.x_max - 2.0, self.y_max - 19.5
-        )
-
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 22.0,
-            format_text(
-                key="Rd",
-                value=self.rd_lat,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + 4.0,
-            self.y_max - 24.0,
-            format_text(
-                key="Wr",
-                value=self.wr_lat,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-            ),
-        )
-
-
-# Wires between L2 block and Fabric
-@dataclass
-class Wire_L2_Fabric(RectFrame):
-    text_x_offset: float = 3.0
-
-    rd: Optional[int] = None
-    wr: Optional[int] = None
-    atomic: Optional[int] = None
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 2.0,
-            format_text(
-                key="Rd",
-                value=self.rd,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 3.0, "<---------------"
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 4.0,
-            format_text(
-                key="Wr",
-                value=self.wr,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 5.0, "--------------->"
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 6.0,
-            format_text(
-                key="Atomic",
-                value=self.atomic,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 7.0, "<-------------->"
-        )
-
-
-# xGMI/PCIe block with wires to fabric
-@dataclass
-class xGMI_PCIe(RectFrame):
-    def draw(self, canvas: Canvas) -> None:
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(self.x_min + 1.0, self.y_max - 2.0, self.label)
-        canvas.text(self.x_min + 3.0, self.y_max - 5.0, "^   |")
-        canvas.text(self.x_min + 3.0, self.y_max - 6.0, "|   |")
-        canvas.text(self.x_min + 3.0, self.y_max - 7.0, "|   |")
-        canvas.text(self.x_min + 3.0, self.y_max - 8.0, "|   v")
-
-
-# Fabric Cache Block
-@dataclass
-class Fabric(RectFrame):
-    lat: dict[str, int] = field(default_factory=dict)
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(self.x_min + 6.0, self.y_max - 2.0, "   " + self.label)
-        canvas.text(self.x_min + 2.0, self.y_max - 4.0, "Latency (cycles)")
-        canvas.rect(
-            self.x_min + 2.0, self.y_max - 9, self.x_max - 2.0, self.y_max - 4.5
-        )
-
-        for i, (k, v) in enumerate(self.lat.items(), 1):
-            text = format_text(
-                key=k,
-                value=v,
-                key_step_prec_leftalign=6,
-                value_step_prec_rightalign=6.0,
-            )
-            canvas.text(self.x_min + 4.0, self.y_max - 4.5 - i, text)
-
-
-# GMI block with wires to fabric
-@dataclass
-class GMI(RectFrame):
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(self.x_min + 3.0, self.y_max + 4.0, "^   |")
-        canvas.text(self.x_min + 3.0, self.y_max + 3.0, "|   |")
-        canvas.text(self.x_min + 3.0, self.y_max + 2.0, "|   |")
-        canvas.text(self.x_min + 3.0, self.y_max + 1.0, "|   v")
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(self.x_min + 4.0, self.y_max - 2.0, self.label)
-
-
-# Wires between fabric and HBM
-@dataclass
-class Wire_Fabric_HBM(RectFrame):
-    text_x_offset: float = 3.0
-
-    rd: int = 0
-    wr: int = 0
-
-    def draw(self, canvas: Canvas) -> None:
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max,
-            format_text(
-                key="Rd",
-                value=self.rd,
-                key_step_prec_leftalign=2,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 1.0, "<-----------"
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset,
-            self.y_max - 2.0,
-            format_text(
-                key="Wr",
-                value=self.wr,
-                key_step_prec_leftalign=2,
-                value_step_prec_rightalign=4.0,
-            ),
-        )
-        canvas.text(
-            self.x_min + self.text_x_offset - 2, self.y_max - 3.0, "----------->"
-        )
-
-
-# HBM
-@dataclass
-class HBM(RectFrame):
-    def draw(self, canvas: Canvas) -> None:
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(self.x_min + 4.0, self.y_max - 2.0, self.label)
-
-
-# Memory chart pannel for 1 instance
-class MemChart:
-    def __init__(self, x_min: float, y_min: float, x_max: float, y_max: float) -> None:
-        self.x_min = x_min
-        self.x_max = x_max
-        self.y_min = y_min
-        self.y_max = y_max
-
-    def draw(
-        self, canvas: Canvas, normal_unit: str, metric_dict: dict[str, Any]
-    ) -> None:
-        # ----------------------------------------
-        # Overall rect and title
-        canvas.rect(self.x_min, self.y_min, self.x_max, self.y_max)
-        canvas.text(
-            self.x_min + 2.0, self.y_max - 2.0, f"(Normalization: {normal_unit})"
-        )
-
-        # FIXME: this is temp solution to filter out non-numeric string
-        for k, v in metric_dict.items():
-            metric_dict[k] = None if isinstance(v, str) else v
-
-        # Typically, the drawing order would be: left->right, top->down
-
-        # ----------------------------------------
-        # Instr Buff Block
-        block_instr_buff = InstrBuff(label="Instr Buff")
-        block_instr_buff.x_min = 2.0
-        block_instr_buff.x_max = block_instr_buff.x_min + 27.0
-        block_instr_buff.y_max = self.y_max - 5.0
-        block_instr_buff.y_min = block_instr_buff.y_max - 24.0
-
-        block_instr_buff.wave_occupancy = metric_dict.get("Wavefront Occupancy", "n/a")
-        block_instr_buff.wave_life = metric_dict.get("Wave Life", "n/a")
-
-        block_instr_buff.draw(canvas)
-
-        # ----------------------------------------
-        # Wires between Instr Buff and Instr Dispatch
-        wire_I_I = Wire_InstrBuff_InstrDispatch(
-            label="Wire_InstrBuff_InstrDispatch",
-            x_min=block_instr_buff.x_max + 1,
-            x_max=block_instr_buff.x_max + 7,
-            y_min=block_instr_buff.y_min,
-            y_max=block_instr_buff.y_max,
-        )
-        wire_I_I.draw(canvas)
-
-        # ----------------------------------------
-        # Instr Dispatch Block
-        block_instr_disp = InstrDispatch(label="Instr Dispatch")
-        block_instr_disp.x_min = block_instr_buff.x_max + 9.0
-        block_instr_disp.x_max = block_instr_disp.x_min + 20.0
-        block_instr_disp.y_max = block_instr_buff.y_max
-        block_instr_disp.y_min = block_instr_buff.y_min
-
-        block_instr_disp.instrs["SALU"] = metric_dict.get("SALU", "n/a")
-        block_instr_disp.instrs["SMEM"] = metric_dict.get("SMEM", "n/a")
-        block_instr_disp.instrs["VALU"] = metric_dict.get("VALU", "n/a")
-        block_instr_disp.instrs["Matrix Ops"] = metric_dict.get("Matrix Ops", "n/a")
-        block_instr_disp.instrs["VMEM"] = metric_dict.get("VMEM", "n/a")
-        block_instr_disp.instrs["LDS"] = metric_dict.get("LDS", "n/a")
-        block_instr_disp.instrs["GWS"] = metric_dict.get("GWS", "n/a")
-        block_instr_disp.instrs["BRANCH"] = metric_dict.get("BR", "n/a")
-
-        block_instr_disp.draw(canvas)
-
-        # ----------------------------------------
-        # Exec Block
-        block_exec = Exec(label="Exec")
-        block_exec.x_min = block_instr_disp.x_max
-        block_exec.x_max = block_exec.x_min + 20
-        block_exec.y_min = block_instr_disp.y_min - 6
-        block_exec.y_max = block_instr_disp.y_max
-
-        block_exec.active_cus = metric_dict.get("Active CUs", "n/a")
-        block_exec.num_cus = metric_dict.get("Num CUs", "n/a")
-        block_exec.vgprs = metric_dict.get("VGPR", "n/a")
-        block_exec.sgprs = metric_dict.get("SGPR", "n/a")
-        block_exec.lds_alloc = metric_dict.get("LDS Allocation", "n/a")
-        block_exec.scratch_alloc = metric_dict.get("Scratch Allocation", "n/a")
-        block_exec.wavefronts = metric_dict.get("Wavefronts", "n/a")
-        block_exec.workgroups = metric_dict.get("Workgroups", "n/a")
-
-        block_exec.draw(canvas)
-
-        # ----------------------------------------
-        # Wires between Exec block and GDS, LDS, Vector L1 cache
-        wires_E_GLV = Wire_E_GLVS(label="Wire_E_GLVS")
-        wires_E_GLV.x_min = block_exec.x_max
-        wires_E_GLV.x_max = wires_E_GLV.x_min + 16
-        wires_E_GLV.y_min = block_instr_disp.y_min
-        wires_E_GLV.y_max = block_instr_disp.y_max
-
-        wires_E_GLV.lds_req = metric_dict.get("LDS Req", "n/a")
-        wires_E_GLV.vl1_rd = metric_dict.get("VL1 Rd", "n/a")
-        wires_E_GLV.vl1_wr = metric_dict.get("VL1 Wr", "n/a")
-        wires_E_GLV.vl1_atomic = metric_dict.get("VL1 Atomic", "n/a")
-        wires_E_GLV.sl1_rd = metric_dict.get("sL1D Rd", "n/a")
-
-        wires_E_GLV.draw(canvas)
-
-        # ----------------------------------------
-        # Wire between Instr Buff and Instr L1 Cache
-        wire_InstrBuff_IL1Cache = Wire_InstrBuff_IL1Cache(
-            label="Wire_InstrBuff_IL1Cache",
-            x_min=block_instr_buff.x_max / 2,
-            x_max=block_instr_buff.x_max / 2 + 80,
-            y_min=block_exec.y_min - 1,
-            y_max=block_instr_buff.y_min,
-        )
-
-        wire_InstrBuff_IL1Cache.il1_fetch = metric_dict.get("IL1 Fetch", "n/a")
-
-        wire_InstrBuff_IL1Cache.draw(canvas)
-
-        # ----------------------------------------
-        # GDS block
-        # block_gds = GDS(label="GDS")
-        # block_gds.x_min = wires_E_GLV.x_max + 1
-        # block_gds.x_max = block_gds.x_min + 24
-        # block_gds.y_max = wires_E_GLV.y_max
-        # block_gds.y_min = block_gds.y_max - 5
-
-        # block_gds.gws = metric_dict["gds_gws"]
-        # block_gds.latency = metric_dict["gds_latency"]
-
-        # block_gds.draw(canvas)
-
-        # ----------------------------------------
-        # LDS block
-        block_lds = LDS(label="LDS")
-        block_lds.x_min = wires_E_GLV.x_max + 1
-        block_lds.x_max = block_lds.x_min + 24
-        block_lds.y_max = wires_E_GLV.y_max
-        block_lds.y_min = block_lds.y_max - 5
-
-        block_lds.util = metric_dict.get("LDS Util", "n/a")
-        block_lds.latency = metric_dict.get("LDS Latency", "n/a")
-
-        block_lds.draw(canvas)
-
-        # ----------------------------------------
-        # Vector L1 Cache Block
-        block_vector_L1 = VectorL1Cache(label="Vector L1 Cache")
-        block_vector_L1.x_min = block_lds.x_min
-        block_vector_L1.x_max = block_lds.x_max
-        block_vector_L1.y_max = block_lds.y_min - 3
-        block_vector_L1.y_min = block_vector_L1.y_max - 9
-
-        block_vector_L1.hit = metric_dict.get("VL1 Hit", "n/a")
-        block_vector_L1.latency = metric_dict.get("VL1 Lat", "n/a")
-        block_vector_L1.coales = metric_dict.get("VL1 Coalesce", "n/a")
-        block_vector_L1.stall = metric_dict.get("VL1 Stall", "n/a")
-
-        block_vector_L1.draw(canvas)
-
-        # ----------------------------------------
-        # Scalar L1D Cache block
-        block_const_L1 = ScalarL1DCache(label="Scalar L1D Cache")
-        block_const_L1.x_min = block_lds.x_min
-        block_const_L1.x_max = block_lds.x_max
-        block_const_L1.y_max = block_vector_L1.y_min - 3
-        block_const_L1.y_min = block_const_L1.y_max - 5
-
-        block_const_L1.hit = metric_dict.get("sL1D Hit", "n/a")
-        block_const_L1.latency = metric_dict.get("sL1D Lat", "n/a")
-
-        block_const_L1.draw(canvas)
-
-        # ----------------------------------------
-        # Instr L1 Cache Block
-        block_instr_L1 = InstrL1Cache(label="Instr L1 Cache")
-        block_instr_L1.x_min = block_const_L1.x_min
-        block_instr_L1.x_max = block_const_L1.x_max
-        block_instr_L1.y_max = block_const_L1.y_min - 3
-        block_instr_L1.y_min = block_instr_L1.y_max - 5
-
-        block_instr_L1.hit = metric_dict.get("IL1 Hit", "n/a")
-        block_instr_L1.latency = metric_dict.get("IL1 Lat", "n/a")
-
-        block_instr_L1.draw(canvas)
-
-        # ----------------------------------------
-        # Wires between Vector L1 cache, Scalar L1D cache, Instr L1 cache and L2 Cache
-        wires_L1_L2 = Wires_L1_L2(label="Wires_L1_L2")
-        wires_L1_L2.x_min = block_instr_L1.x_max + 4
-        wires_L1_L2.x_max = wires_L1_L2.x_min + 14
-        wires_L1_L2.y_min = block_instr_L1.y_min
-        wires_L1_L2.y_max = block_vector_L1.y_max
-        wires_L1_L2.vl1_l2_rd = metric_dict.get("VL1_L2 Rd", "n/a")
-        wires_L1_L2.vl1_l2_wr = metric_dict.get("VL1_L2 Wr", "n/a")
-        wires_L1_L2.vl1_l2_atomic = metric_dict.get("VL1_L2 Atomic", "n/a")
-        wires_L1_L2.sl1_l2_rd = metric_dict.get("sL1D_L2 Rd", "n/a")
-        wires_L1_L2.sl1_l2_wr = metric_dict.get("sL1D_L2 Wr", "n/a")
-        wires_L1_L2.sl1_l2_atomic = metric_dict.get("sL1D_L2 Atomic", "n/a")
-        wires_L1_L2.il1_l2_req = metric_dict.get("IL1_L2 Rd", "n/a")
-
-        wires_L1_L2.draw(canvas)
-
-        # ----------------------------------------
-        # L2 Cache Block
-        block_L2 = L2Cache(label="L2 Cache")
-
-        block_L2.x_min = wires_L1_L2.x_max + 1
-        block_L2.x_max = block_L2.x_min + 24
-        block_L2.y_min = block_instr_L1.y_min
-        block_L2.y_max = block_lds.y_max
-
-        block_L2.hit = metric_dict.get("L2 Hit", "n/a")
-        block_L2.rd = metric_dict.get("L2 Rd", "n/a")
-        block_L2.wr = metric_dict.get("L2 Wr", "n/a")
-        block_L2.atomic = metric_dict.get("L2 Atomic", "n/a")
-        block_L2.rd_lat = metric_dict.get("L2 Rd Lat", "n/a")
-        block_L2.wr_lat = metric_dict.get("L2 Wr Lat", "n/a")
-
-        block_L2.draw(canvas)
-
-        # ----------------------------------------
-        # Wires between L2 and Fabric
-        wires_L2_Fabric = Wire_L2_Fabric(
-            label="Wire_L2_Fabric",
-            x_min=block_L2.x_max + 1,
-            x_max=block_L2.x_max + 16,
-            y_min=block_L2.y_max - 18,
-            y_max=block_L2.y_max - 10,
-        )
-
-        wires_L2_Fabric.rd = metric_dict.get("Fabric_L2 Rd", "n/a")
-        wires_L2_Fabric.wr = metric_dict.get("Fabric_L2 Wr", "n/a")
-        wires_L2_Fabric.atomic = metric_dict.get("Fabric_L2 Atomic", "n/a")
-
-        wires_L2_Fabric.draw(canvas)
-
-        # ----------------------------------------
-        # xGMI/PCIe Block with wires to fabric
-        block_xgmi_pcie = xGMI_PCIe(
-            label="xGMI/PCIe",
-            x_min=wires_L2_Fabric.x_max + 10,
-            x_max=wires_L2_Fabric.x_max + 20,
-            y_min=block_L2.y_max - 4,
-            y_max=block_L2.y_max,
-        )
-        block_xgmi_pcie.draw(canvas)
-
-        # ----------------------------------------
-        # Data Fabric Block
-        block_fabric = Fabric(
-            label="Fabric",
-            x_min=wires_L2_Fabric.x_max + 3,
-            x_max=wires_L2_Fabric.x_max + 27,
-            y_max=block_xgmi_pcie.y_min - 5,
-            y_min=block_xgmi_pcie.y_min - 5 - 11,
-        )
-
-        block_fabric.lat["Rd"] = metric_dict.get("Fabric Rd Lat", "n/a")
-        block_fabric.lat["Wr"] = metric_dict.get("Fabric Wr Lat", "n/a")
-        block_fabric.lat["Atomic"] = metric_dict.get("Fabric Atomic Lat", "n/a")
-
-        block_fabric.draw(canvas)
-
-        # ----------------------------------------
-        # GMI Block with wires to fabric
-        block_gmi = GMI(
-            label="GMI",
-            x_min=block_xgmi_pcie.x_min,
-            x_max=block_xgmi_pcie.x_max,
-            y_min=block_fabric.y_min - 9,
-            y_max=block_fabric.y_min - 5,
-        )
-        block_gmi.draw(canvas)
-
-        # ----------------------------------------
-        # Wires between fabric and HBM
-        # Wire_Fabric_HBM
-        wires_Fabric_HBM = Wire_Fabric_HBM(
-            label="Wire_Fabric_HBM",
-            x_min=block_fabric.x_max + 1,
-            x_max=block_fabric.x_max + 15,
-            y_min=block_fabric.y_max - 2,
-            y_max=block_fabric.y_max - 4,
-        )
-
-        wires_Fabric_HBM.rd = metric_dict.get("HBM Rd", "n/a")
-        wires_Fabric_HBM.wr = metric_dict.get("HBM Wr", "n/a")
-
-        wires_Fabric_HBM.draw(canvas)
-
-        # ----------------------------------------
-        # HBM Block
-        block_hbm = HBM(
-            label="HBM",
-            x_min=wires_Fabric_HBM.x_max,
-            x_max=wires_Fabric_HBM.x_max + 10,
-            y_min=block_fabric.y_max - 7,
-            y_max=block_fabric.y_max - 3,
-        )
-        block_hbm.draw(canvas)
-
-
-def plot_mem_chart(normal_unit: str, metric_dict: dict[str, Any]) -> str:
-    canvas = Canvas(width=234, height=42, xmax=234, ymax=42)
-    mc = MemChart(0, 0, 233, 41)
-    mc.draw(canvas, normal_unit, metric_dict)
-
-    return canvas.plot()
+        metrics = get_sample_metrics()
+
+    heading = format_mem_chart_heading(args.norm)
+
+    if args.txt:
+        clean = _render_to_plain_text(
+            metrics,
+            heading,
+            args.debug,
+        )
+        with pathlib.Path(args.txt).open("w", encoding="utf-8") as f:
+            f.write(clean)
+        return
+
+    if args.svg:
+        console = Console(record=True, width=240, height=80)
+        create_mem_chart_diagram(
+            metrics,
+            console,
+            show_debug=args.debug,
+            chart_title=heading,
+        )
+        console.save_svg(args.svg, title="CDNA Memory Chart")
+        return
+
+    console = Console(width=240)
+    create_mem_chart_diagram(
+        metrics,
+        console,
+        show_debug=args.debug,
+        chart_title=heading,
+    )
+
+
+if __name__ == "__main__":
+    main()
