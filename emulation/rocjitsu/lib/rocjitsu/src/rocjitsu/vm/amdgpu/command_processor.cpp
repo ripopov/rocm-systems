@@ -714,6 +714,7 @@ uint32_t CommandProcessor::dispatch_workgroups(DispatchEntry &entry) {
       wf->set_lds(placement.lds);
       wf->set_dispatch_id(entry.dispatch_id);
       wf->set_process_id(entry.process_id);
+      wf->set_queue_id(entry.queue_id);
       wf->set_exec(initial_exec_mask_for_wave(entry, global_wg_id, w, cu->wf_size()));
       wf->set_cluster_info(entry.cluster_rank_for_local_wg(local_wg_id), entry.cluster_size());
       init_wavefront_regs(cu, wf, entry, global_wg_id, w);
@@ -844,7 +845,7 @@ void CommandProcessor::on_cu_idle() {
 
   std::vector<bool> was_idle(cus_.size());
   for (size_t i = 0; i < cus_.size(); ++i)
-    was_idle[i] = !cus_[i]->has_active_wfs();
+    was_idle[i] = cus_[i]->is_idle();
 
   for (auto &qs : new_queue_states_) {
     if (qs.next_dispatch_idx < qs.entries.size()) {
@@ -862,7 +863,7 @@ void CommandProcessor::on_cu_idle() {
   }
 
   for (size_t i = 0; i < cus_.size(); ++i) {
-    if (was_idle[i] && cus_[i]->has_active_wfs())
+    if (was_idle[i] && !cus_[i]->is_idle())
       cus_[i]->activate();
   }
 }
@@ -1479,7 +1480,7 @@ void CommandProcessor::handle_doorbell(simdojo::Tick) {
   }
 
   for (size_t i = 0; i < cus_.size(); ++i) {
-    if (cus_[i]->has_active_wfs()) {
+    if (!cus_[i]->is_idle()) {
       if (dispatch_ports_[i]->link())
         dispatch_ports_[i]->send(std::make_unique<simdojo::Message>(simdojo::MessageHeader{}));
       else

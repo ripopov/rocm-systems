@@ -114,6 +114,7 @@ public:
         wf->set_lds(placement->lds);
         wf->set_dispatch_id(wg.entry->dispatch_id);
         wf->set_process_id(wg.entry->process_id);
+        wf->set_queue_id(wg.entry->queue_id);
         wf->set_exec(initial_exec_mask_for_wave(*wg.entry, wg.global_wg_id, w, cu->wf_size()));
         init_wf(cu, wf, *wg.entry, wg.global_wg_id, w);
         wg_wfs.push_back(wf);
@@ -129,14 +130,14 @@ public:
 
   /// @brief Step each CU once (one round-robin pass within this SE).
   bool step() {
-    bool any_active = false;
+    bool any_runnable = false;
     for (auto *cu : cus_) {
-      if (cu->has_active_wfs()) {
+      if (cu->has_runnable_wfs()) {
         cu->step();
-        any_active = true;
+        any_runnable = true;
       }
     }
-    return any_active;
+    return any_runnable;
   }
 
   /// @brief Check if any WGs are queued or any CU is active.
@@ -145,7 +146,7 @@ public:
       if (!q.empty())
         return true;
     for (auto *cu : cus_)
-      if (cu->has_active_wfs())
+      if (cu->has_runnable_wfs())
         return true;
     return false;
   }
@@ -156,7 +157,7 @@ public:
     while (progress) {
       progress = false;
       for (auto *cu : cus_) {
-        if (cu->has_active_wfs()) {
+        if (cu->has_runnable_wfs()) {
           cu->step();
           progress = true;
         }
