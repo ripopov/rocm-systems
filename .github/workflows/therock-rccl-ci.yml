@@ -12,7 +12,7 @@ on:
       notify_email:
         description: 'Email address to send test summary report'
         type: string
-        default: 'prmuruge@amd.com'
+        default: 'collectives-ci@amd.com'
 
 permissions:
   contents: read
