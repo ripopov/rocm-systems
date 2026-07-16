@@ -1298,17 +1298,6 @@ if(HSA_RUNTIME64)
             )
         endforeach()
 
-        _rj_path_from_installed_test_bin(
-            _rj_installed_cdna3_kmd_config
-            "${CMAKE_INSTALL_DATADIR}/rocjitsu/configs"
-            "${RJ_CDNA3_KMD_CONFIG_NAME}"
-        )
-        _rj_path_from_installed_test_bin(
-            _rj_installed_cdna4_to_cdna3_sim_dbt_config
-            "${CMAKE_INSTALL_DATADIR}/rocjitsu/configs"
-            "${RJ_CDNA4_TO_CDNA3_SIM_DBT_CONFIG_NAME}"
-        )
-
         set(RJ_CDNA4_TO_CDNA3_DISPATCH_RUN_TESTS
             DynamicCopyLoopDispatchAndRun
             TritonDynamicMatmulDispatchAndRun
@@ -1329,7 +1318,7 @@ if(HSA_RUNTIME64)
                 INSTALL_COMMAND
                     "\${RJ_INSTALLED_BINDIR}/rocjitsu"
                     "--config"
-                    "${_rj_installed_cdna3_kmd_config}"
+                    "\${RJ_INSTALLED_CONFIG_DIR}/${RJ_CDNA3_KMD_CONFIG_NAME}"
                     "--"
                     "bin/${RJ_CDNA4_TO_CDNA3_DISPATCH_TEST_EXE}"
                     "--gtest_filter=Cdna4ToCdna3DispatchTest.${_test_name}"
@@ -1359,7 +1348,7 @@ if(HSA_RUNTIME64)
                 INSTALL_COMMAND
                     "\${RJ_INSTALLED_BINDIR}/rocjitsu"
                     "--config"
-                    "${_rj_installed_cdna4_to_cdna3_sim_dbt_config}"
+                    "\${RJ_INSTALLED_CONFIG_DIR}/${RJ_CDNA4_TO_CDNA3_SIM_DBT_CONFIG_NAME}"
                     "--"
                     "bin/${RJ_CDNA4_TO_CDNA3_DISPATCH_TEST_EXE}"
                     "--gtest_filter=Cdna4ToCdna3DbtGuestTest.${_test_name}"
