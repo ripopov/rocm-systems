@@ -352,7 +352,7 @@ inline void execute_s_add_co_i32_sop2([[maybe_unused]] Inst &inst, [[maybe_unuse
   uint32_t s1 = inst.ssrc1.read_scalar(wf);
   uint32_t result = (s0 + s1);
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc(signed_add_overflows(s0, s1));
+  wf.write_scc(::rocjitsu::amdgpu::signed_add_overflows(s0, s1));
 }
 
 template <typename Inst>
@@ -384,7 +384,7 @@ inline void execute_s_add_i32_sop2([[maybe_unused]] Inst &inst, [[maybe_unused]]
   uint32_t s1 = inst.ssrc1.read_scalar(wf);
   uint32_t result = (s0 + s1);
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc(signed_add_overflows(s0, s1));
+  wf.write_scc(::rocjitsu::amdgpu::signed_add_overflows(s0, s1));
 }
 
 template <typename Inst>
@@ -417,13 +417,13 @@ inline void execute_s_addc_u32_sop2([[maybe_unused]] Inst &inst, [[maybe_unused]
 
 template <typename Inst>
 inline void execute_s_addk_i32_sopk([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
-  uint32_t s0 = inst.sdst.read_scalar(wf);
-  uint32_t imm = static_cast<uint32_t>(
-      static_cast<int32_t>(static_cast<int16_t>(inst.simm16.encoding_value_)));
-  uint64_t wide = static_cast<uint64_t>(s0) + static_cast<uint64_t>(imm);
-  uint32_t result = static_cast<uint32_t>(wide);
-  inst.sdst.write_scalar(wf, result);
-  wf.write_scc(wide > 0xFFFFFFFFu);
+  wf.write_scc(::rocjitsu::amdgpu::signed_add_overflows(
+      inst.sdst.read_scalar(wf),
+      static_cast<uint32_t>(
+          static_cast<int32_t>(static_cast<int32_t>(inst.simm16.read_scalar(wf) << 16) >> 16))));
+  inst.sdst.write_scalar(wf, (inst.sdst.read_scalar(wf) +
+                              static_cast<uint32_t>(static_cast<int32_t>(
+                                  static_cast<int32_t>(inst.simm16.read_scalar(wf) << 16) >> 16))));
 }
 
 template <typename Inst>
@@ -460,24 +460,32 @@ template <typename Inst>
 inline void execute_s_and_not0_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                                  [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec & (~src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec & (~src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_and_not0_wrexec_b32_sop1([[maybe_unused]] Inst &inst,
                                                [[maybe_unused]] Wavefront &wf) {
   uint64_t src = inst.ssrc0.read_scalar(wf);
-  wf.set_exec((wf.exec() & ~src) & 0xffffffffULL);
+  uint64_t old_exec = wf.exec();
+  uint64_t result = ((old_exec & (~src)) & 0xffffffffULL);
+  inst.sdst.write_scalar(wf, static_cast<uint32_t>(result));
+  wf.set_exec(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_and_not0_wrexec_b64_sop1([[maybe_unused]] Inst &inst,
                                                [[maybe_unused]] Wavefront &wf) {
-  uint64_t src = inst.ssrc0.read_scalar64(wf);
-  wf.set_exec((wf.exec() & ~src));
+  uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
+  uint64_t old_exec = wf.exec_raw();
+  uint64_t result = (old_exec & (~src));
+  inst.sdst.write_scalar64(wf, static_cast<uint64_t>(result));
+  wf.set_exec_raw(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -511,24 +519,32 @@ template <typename Inst>
 inline void execute_s_and_not1_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                                  [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((src & (~old_exec)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((src & (~old_exec)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_and_not1_wrexec_b32_sop1([[maybe_unused]] Inst &inst,
                                                [[maybe_unused]] Wavefront &wf) {
   uint64_t src = inst.ssrc0.read_scalar(wf);
-  wf.set_exec((src & ~wf.exec()) & 0xffffffffULL);
+  uint64_t old_exec = wf.exec();
+  uint64_t result = ((src & (~old_exec)) & 0xffffffffULL);
+  inst.sdst.write_scalar(wf, static_cast<uint32_t>(result));
+  wf.set_exec(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_and_not1_wrexec_b64_sop1([[maybe_unused]] Inst &inst,
                                                [[maybe_unused]] Wavefront &wf) {
-  uint64_t src = inst.ssrc0.read_scalar64(wf);
-  wf.set_exec((src & ~wf.exec()));
+  uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
+  uint64_t old_exec = wf.exec_raw();
+  uint64_t result = (src & (~old_exec));
+  inst.sdst.write_scalar64(wf, static_cast<uint64_t>(result));
+  wf.set_exec_raw(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -545,10 +561,10 @@ template <typename Inst>
 inline void execute_s_and_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec & src));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec & src));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -565,24 +581,32 @@ template <typename Inst>
 inline void execute_s_andn1_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                               [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec & (~src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec & (~src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_andn1_wrexec_b32_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
   uint64_t src = inst.ssrc0.read_scalar(wf);
-  wf.set_exec((src & ~wf.exec()) & 0xffffffffULL);
+  uint64_t old_exec = wf.exec();
+  uint64_t result = ((old_exec & (~src)) & 0xffffffffULL);
+  inst.sdst.write_scalar(wf, static_cast<uint32_t>(result));
+  wf.set_exec(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_andn1_wrexec_b64_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
-  uint64_t src = inst.ssrc0.read_scalar64(wf);
-  wf.set_exec((src & ~wf.exec()));
+  uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
+  uint64_t old_exec = wf.exec_raw();
+  uint64_t result = (old_exec & (~src));
+  inst.sdst.write_scalar64(wf, static_cast<uint64_t>(result));
+  wf.set_exec_raw(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -614,24 +638,32 @@ template <typename Inst>
 inline void execute_s_andn2_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                               [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((src & (~old_exec)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((src & (~old_exec)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_andn2_wrexec_b32_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
   uint64_t src = inst.ssrc0.read_scalar(wf);
-  wf.set_exec((wf.exec() & ~src) & 0xffffffffULL);
+  uint64_t old_exec = wf.exec();
+  uint64_t result = ((src & (~old_exec)) & 0xffffffffULL);
+  inst.sdst.write_scalar(wf, static_cast<uint32_t>(result));
+  wf.set_exec(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
 inline void execute_s_andn2_wrexec_b64_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
-  uint64_t src = inst.ssrc0.read_scalar64(wf);
-  wf.set_exec((wf.exec() & ~src));
+  uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
+  uint64_t old_exec = wf.exec_raw();
+  uint64_t result = (src & (~old_exec));
+  inst.sdst.write_scalar64(wf, static_cast<uint64_t>(result));
+  wf.set_exec_raw(result);
+  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -1724,7 +1756,7 @@ inline void execute_s_max_i32_sop2([[maybe_unused]] Inst &inst, [[maybe_unused]]
   int32_t s1 = static_cast<int32_t>(inst.ssrc1.read_scalar(wf));
   int32_t result = std::max(s0, s1);
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((s0 >= s1));
+  wf.write_scc((s0 > s1));
 }
 
 template <typename Inst>
@@ -1749,7 +1781,7 @@ inline void execute_s_max_u32_sop2([[maybe_unused]] Inst &inst, [[maybe_unused]]
   uint32_t s1 = inst.ssrc1.read_scalar(wf);
   uint32_t result = std::max(s0, s1);
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((s0 >= s1));
+  wf.write_scc((s0 > s1));
 }
 
 template <typename Inst>
@@ -1966,10 +1998,10 @@ template <typename Inst>
 inline void execute_s_nand_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                              [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((~(old_exec & src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((~(old_exec & src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2004,10 +2036,10 @@ template <typename Inst>
 inline void execute_s_nor_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((~(old_exec | src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((~(old_exec | src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2053,10 +2085,10 @@ template <typename Inst>
 inline void execute_s_or_not0_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                                 [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec | (~src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec | (~src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2090,10 +2122,10 @@ template <typename Inst>
 inline void execute_s_or_not1_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                                 [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((src | (~old_exec)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((src | (~old_exec)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2110,10 +2142,10 @@ template <typename Inst>
 inline void execute_s_or_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                            [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec | src));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec | src));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2130,10 +2162,10 @@ template <typename Inst>
 inline void execute_s_orn1_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                              [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec | (~src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec | (~src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2165,10 +2197,10 @@ template <typename Inst>
 inline void execute_s_orn2_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                              [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((src | (~old_exec)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((src | (~old_exec)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2405,7 +2437,7 @@ inline void execute_s_sub_co_i32_sop2([[maybe_unused]] Inst &inst, [[maybe_unuse
   uint32_t s1 = inst.ssrc1.read_scalar(wf);
   uint32_t result = (s0 - s1);
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc(signed_sub_overflows(s0, s1));
+  wf.write_scc(::rocjitsu::amdgpu::signed_sub_overflows(s0, s1));
 }
 
 template <typename Inst>
@@ -2437,7 +2469,7 @@ inline void execute_s_sub_i32_sop2([[maybe_unused]] Inst &inst, [[maybe_unused]]
   uint32_t s1 = inst.ssrc1.read_scalar(wf);
   uint32_t result = (s0 - s1);
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc(signed_sub_overflows(s0, s1));
+  wf.write_scc(::rocjitsu::amdgpu::signed_sub_overflows(s0, s1));
 }
 
 template <typename Inst>
@@ -2567,10 +2599,10 @@ template <typename Inst>
 inline void execute_s_xnor_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                              [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((~(old_exec ^ src)));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((~(old_exec ^ src)));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>
@@ -2602,10 +2634,10 @@ template <typename Inst>
 inline void execute_s_xor_saveexec_b64_sop1([[maybe_unused]] Inst &inst,
                                             [[maybe_unused]] Wavefront &wf) {
   uint64_t src = static_cast<uint64_t>(inst.ssrc0.read_scalar64(wf));
-  uint64_t old_exec = wf.exec();
+  uint64_t old_exec = wf.exec_raw();
   inst.sdst.write_scalar64(wf, old_exec);
-  wf.set_exec((old_exec ^ src));
-  wf.write_scc((wf.exec() != 0ULL));
+  wf.set_exec_raw((old_exec ^ src));
+  wf.write_scc((wf.exec_raw() != 0ULL));
 }
 
 template <typename Inst>

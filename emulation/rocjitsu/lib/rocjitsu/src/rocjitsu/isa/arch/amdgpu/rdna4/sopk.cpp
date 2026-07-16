@@ -75,13 +75,12 @@ SAddkCoI32Sopk::SAddkCoI32Sopk(const MachineInst *inst)
 }
 
 void SAddkCoI32Sopk::execute_impl(amdgpu::Wavefront &wf) {
-  uint32_t s0 = sdst.read_scalar(wf);
-  uint32_t imm =
-      static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(simm16.encoding_value_)));
-  uint64_t wide = static_cast<uint64_t>(s0) + static_cast<uint64_t>(imm);
-  uint32_t result = static_cast<uint32_t>(wide);
-  sdst.write_scalar(wf, result);
-  wf.write_scc(wide > 0xFFFFFFFFu);
+  wf.write_scc(::rocjitsu::amdgpu::signed_add_overflows(
+      sdst.read_scalar(wf), static_cast<uint32_t>(static_cast<int32_t>(
+                                static_cast<int32_t>(simm16.read_scalar(wf) << 16) >> 16))));
+  sdst.write_scalar(
+      wf, (sdst.read_scalar(wf) + static_cast<uint32_t>(static_cast<int32_t>(
+                                      static_cast<int32_t>(simm16.read_scalar(wf) << 16) >> 16))));
 }
 
 SMulkI32Sopk::SMulkI32Sopk(const MachineInst *inst)
