@@ -143,6 +143,9 @@ public:
   }
 
   static std::shared_ptr<ExecutionPluginGroup> empty_group() {
+    // This is a process-lifetime allocation and intentional.
+    // It prevents a late empty_group() call during static teardown from using a destroyed
+    // function-local shared_ptr. The GCC-ASan interposer tests exposed this ordering.
     static const auto *instance =
         new std::shared_ptr<ExecutionPluginGroup>(std::make_shared<ExecutionPluginGroup>());
     return *instance;
