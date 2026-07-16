@@ -887,7 +887,6 @@ inline void execute_s_brev_b32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]
     return r;
   }();
   inst.sdst.write_scalar(wf, result);
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
@@ -900,7 +899,6 @@ inline void execute_s_brev_b64_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]
     return r;
   }();
   inst.sdst.write_scalar64(wf, result);
-  wf.write_scc((result != 0ULL));
 }
 
 template <typename Inst>
@@ -927,14 +925,12 @@ template <typename Inst>
 inline void execute_s_ceil_f16_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
   float result = std::ceil(util::f16_to_f32(static_cast<uint16_t>(inst.ssrc0.read_scalar(wf))));
   inst.sdst.write_scalar(wf, util::f32_to_f16(result));
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
 inline void execute_s_ceil_f32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
   float result = std::ceil(std::bit_cast<float>(inst.ssrc0.read_scalar(wf)));
   inst.sdst.write_scalar(wf, std::bit_cast<uint32_t>(result));
-  wf.write_scc((result != 0.0f));
 }
 
 template <typename Inst>
@@ -942,12 +938,11 @@ inline void execute_s_clause_sopp([[maybe_unused]] Inst &inst, [[maybe_unused]] 
 
 template <typename Inst>
 inline void execute_s_cls_i32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
-  uint32_t result = [&]() {
-    int32_t sv = static_cast<int32_t>(inst.ssrc0.read_scalar(wf));
-    if (sv == 0 || sv == -1)
-      return 31u;
-    uint32_t u = sv < 0 ? ~static_cast<uint32_t>(sv) : static_cast<uint32_t>(sv);
-    return static_cast<uint32_t>(std::countl_zero(u)) - 1u;
+  int32_t result = [&]() {
+    int32_t sv = static_cast<int32_t>(static_cast<int32_t>(inst.ssrc0.read_scalar(wf)));
+    uint32_t abs_val = sv < 0 ? ~static_cast<uint32_t>(sv) : static_cast<uint32_t>(sv);
+    return abs_val == 0 ? static_cast<uint32_t>(-1)
+                        : static_cast<uint32_t>(std::countl_zero(abs_val));
   }();
   inst.sdst.write_scalar(wf, result);
 }
@@ -956,11 +951,10 @@ template <typename Inst>
 inline void execute_s_cls_i32_i64_sop1([[maybe_unused]] Inst &inst,
                                        [[maybe_unused]] Wavefront &wf) {
   int64_t result = [&]() {
-    int32_t sv = static_cast<int32_t>(static_cast<int64_t>(inst.ssrc0.read_scalar64(wf)));
-    if (sv == 0 || sv == -1)
-      return 31u;
-    uint32_t u = sv < 0 ? ~static_cast<uint32_t>(sv) : static_cast<uint32_t>(sv);
-    return static_cast<uint32_t>(std::countl_zero(u)) - 1u;
+    int64_t sv = static_cast<int64_t>(static_cast<int64_t>(inst.ssrc0.read_scalar64(wf)));
+    uint64_t abs_val = sv < 0 ? ~static_cast<uint64_t>(sv) : static_cast<uint64_t>(sv);
+    return abs_val == 0 ? static_cast<uint32_t>(-1)
+                        : static_cast<uint32_t>(std::countl_zero(abs_val));
   }();
   inst.sdst.write_scalar(wf, result);
 }
@@ -1602,14 +1596,12 @@ inline void execute_s_floor_f16_sop1([[maybe_unused]] Inst &inst, [[maybe_unused
   float result =
       util::floor_scalar(util::f16_to_f32(static_cast<uint16_t>(inst.ssrc0.read_scalar(wf))));
   inst.sdst.write_scalar(wf, util::f32_to_f16(result));
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
 inline void execute_s_floor_f32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
   float result = util::floor_scalar(std::bit_cast<float>(inst.ssrc0.read_scalar(wf)));
   inst.sdst.write_scalar(wf, std::bit_cast<uint32_t>(result));
-  wf.write_scc((result != 0.0f));
 }
 
 template <typename Inst>
@@ -2249,14 +2241,12 @@ inline void execute_s_rndne_f16_sop1([[maybe_unused]] Inst &inst, [[maybe_unused
   float result =
       std::nearbyint(util::f16_to_f32(static_cast<uint16_t>(inst.ssrc0.read_scalar(wf))));
   inst.sdst.write_scalar(wf, util::f32_to_f16(result));
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
 inline void execute_s_rndne_f32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
   float result = std::nearbyint(std::bit_cast<float>(inst.ssrc0.read_scalar(wf)));
   inst.sdst.write_scalar(wf, std::bit_cast<uint32_t>(result));
-  wf.write_scc((result != 0.0f));
 }
 
 template <typename Inst>
@@ -2482,14 +2472,12 @@ inline void execute_s_trunc_f16_sop1([[maybe_unused]] Inst &inst, [[maybe_unused
   float result =
       util::trunc_scalar(util::f16_to_f32(static_cast<uint16_t>(inst.ssrc0.read_scalar(wf))));
   inst.sdst.write_scalar(wf, util::f32_to_f16(result));
-  wf.write_scc((result != 0));
 }
 
 template <typename Inst>
 inline void execute_s_trunc_f32_sop1([[maybe_unused]] Inst &inst, [[maybe_unused]] Wavefront &wf) {
   float result = util::trunc_scalar(std::bit_cast<float>(inst.ssrc0.read_scalar(wf)));
   inst.sdst.write_scalar(wf, std::bit_cast<uint32_t>(result));
-  wf.write_scc((result != 0.0f));
 }
 
 template <typename Inst>
