@@ -271,7 +271,7 @@ uint64_t InterceptQueue::Submit(const AqlPacket* packets, uint64_t count) {
       ring[barrier & mask].barrier_and.completion_signal = Signal::Convert(async_doorbell_);
       if (wrapped->IsDeviceMemRingBuf() && needsPcieOrdering()) {
         // Ensure the packet body is written as header may get reordered when writing over PCIE
-        _mm_sfence();
+        host::StoreFence();
       }
       atomic::Store(&ring[barrier & mask].barrier_and.header, kBarrierHeader,
                     std::memory_order_release);
@@ -318,7 +318,7 @@ uint64_t InterceptQueue::Submit(const AqlPacket* packets, uint64_t count) {
       if (write_index != 0) {
         if (wrapped->IsDeviceMemRingBuf() && needsPcieOrdering()) {
           // Ensure the packet body is written as header may get reordered when writing over PCIE
-          _mm_sfence();
+          host::StoreFence();
         }
         atomic::Store(&ring[write & mask].packet.header, packets[first_written_packet_index].packet.header,
                       std::memory_order_release);
@@ -419,7 +419,7 @@ void InterceptQueue::StoreRelaxed(hsa_signal_value_t value) {
 
     if (IsDeviceMemRingBuf() && needsPcieOrdering()) {
       // Ensure the packet body is written as header may get reordered when writing over PCIE
-      _mm_sfence();
+      host::StoreFence();
     }
   }
   i = next_packet_;

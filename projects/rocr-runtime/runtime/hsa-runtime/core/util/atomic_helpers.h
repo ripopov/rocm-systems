@@ -48,6 +48,8 @@
 #ifndef HSA_RUNTIME_CORE_UTIL_ATOMIC_HELPERS_H_
 #define HSA_RUNTIME_CORE_UTIL_ATOMIC_HELPERS_H_
 
+#include "host_primitives.h"
+
 #if defined(_WIN32)
 #define WIN32_NO_STATUS
 #include <Windows.h>
@@ -185,9 +187,6 @@ void __atomic_exchange(T* object, typename std::remove_volatile<T>::type* val,
 #if defined(__x86_64__) || defined(_M_X64)
 #define X64_ORDER_WC 1
 #endif
-#if X64_ORDER_WC
-#include <xmmintrin.h>
-#endif
 #endif
 
 namespace rocr {
@@ -224,7 +223,7 @@ static __forceinline void PreFence(std::memory_order order) {
     case std::memory_order_release:
     case std::memory_order_seq_cst:
     case std::memory_order_acq_rel:
-      _mm_sfence();
+      host::StoreFence();
     default:;
   }
 #endif
@@ -242,7 +241,7 @@ static __forceinline void PostFence(std::memory_order order) {
 #elif X64_ORDER_WC
   switch (order) {
     case std::memory_order_seq_cst:
-      return _mm_mfence();
+      return host::FullFence();
     case std::memory_order_acq_rel:
     case std::memory_order_acquire:
       return _mm_lfence();
@@ -258,11 +257,11 @@ static __forceinline void Fence(std::memory_order order=std::memory_order_seq_cs
   switch (order) {
     case std::memory_order_seq_cst:
     case std::memory_order_acq_rel:
-      return _mm_mfence();
+      return host::FullFence();
     case std::memory_order_acquire:
       return _mm_lfence();
     case std::memory_order_release:
-      return _mm_sfence();
+      return host::StoreFence();
     default:;
   }
 #else
