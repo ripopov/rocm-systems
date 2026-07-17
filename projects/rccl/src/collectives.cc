@@ -462,29 +462,38 @@ ncclResult_t ncclAlltoAllv_impl(const void *sendbuff, const size_t sendcounts[],
     }
 #endif
 
-  if (comm->nNodes == 1 && (comm->config.CTAPolicy & NCCL_CTA_POLICY_ZERO)) {
-        const size_t nLocal = 4 * (size_t)nRanks;
-	const size_t nGather = nLocal * (size_t)nRanks;
+  struct ncclDevrWindow* sendWin = nullptr;
+  struct ncclDevrWindow* recvWin = nullptr;
+  NCCLCHECK(ncclDevrFindWindow(comm, sendbuff, &sendWin));
+  NCCLCHECK(ncclDevrFindWindow(comm, recvbuff, &recvWin));
+  ncclSymRegType_t winRegType;
+  NCCLCHECK(ncclGetSymRegType(sendWin, recvWin, &winRegType));
+  bool ceAlltoAllvEligible = (comm->config.CTAPolicy & NCCL_CTA_POLICY_ZERO) &&
+      ncclCeAvailable(comm, ncclFuncAlltoAllv, ncclDevSum, datatype, winRegType);
 
-        CUDACHECK(cudaMemcpyAsync(comm->localSizes, sizes.data(), nLocal * sizeof(size_t),
+  if (ceAlltoAllvEligible) {
+    const size_t nLocal = 4 * (size_t)nRanks;
+    const size_t nGather = nLocal * (size_t)nRanks;
+
+    CUDACHECK(cudaMemcpyAsync(comm->localSizes, sizes.data(), nLocal * sizeof(size_t),
                                 cudaMemcpyHostToDevice, stream));
-        NCCLCHECK(ncclGroupStart());
-        for (int r = 0; r < nRanks; r++) {
-            void* recvPtr = (void*)((char*)comm->gatheredSizes + (size_t)r * nLocal * sizeof(size_t));
-            NCCLCHECK(ncclSend(comm->localSizes, nLocal, ncclUint64, r, comm, stream));
-            NCCLCHECK(ncclRecv(recvPtr, nLocal, ncclUint64, r, comm, stream));
-        }
-        NCCLCHECK(ncclGroupEnd());
-        CUDACHECK(cudaMemcpyAsync(gatheredSizes.data(), comm->gatheredSizes, nGather * sizeof(size_t),
+    NCCLCHECK(ncclGroupStart());
+    for (int r = 0; r < nRanks; r++) {
+      void* recvPtr = (void*)((char*)comm->gatheredSizes + (size_t)r * nLocal * sizeof(size_t));
+      NCCLCHECK(ncclSend(comm->localSizes, nLocal, ncclUint64, r, comm, stream));
+      NCCLCHECK(ncclRecv(recvPtr, nLocal, ncclUint64, r, comm, stream));
+    }
+    NCCLCHECK(ncclGroupEnd());
+    CUDACHECK(cudaMemcpyAsync(gatheredSizes.data(), comm->gatheredSizes, nGather * sizeof(size_t),
                                   cudaMemcpyDeviceToHost, stream));
-        CUDACHECK(cudaStreamSynchronize(stream));
+    CUDACHECK(cudaStreamSynchronize(stream));
 
-        struct ncclInfo info = { ncclFuncAlltoAllv, "AlltoAllv",
+    struct ncclInfo info = { ncclFuncAlltoAllv, "AlltoAllv",
                 sendbuff, recvbuff, 0, datatype, ncclSum, 0, comm, stream,
                 ALLTOALL_CHUNKSTEPS, ALLTOALL_SLICESTEPS, nullptr };
-        info.sizes = gatheredSizes.data();
+    info.sizes = gatheredSizes.data();
 
-        return ncclEnqueueCheck(&info);
+    return ncclEnqueueCheck(&info);
   } else {
 
     Recorder::instance().skip(true);
