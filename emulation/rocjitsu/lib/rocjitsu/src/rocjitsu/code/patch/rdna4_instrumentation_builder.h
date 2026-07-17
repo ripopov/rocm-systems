@@ -130,10 +130,10 @@ build_ds_storexchg_rtn_b64(uint16_t vdst, uint16_t vaddr, uint16_t vdata, uint8_
                            rj_code_arch_t arch) {
   if (!is_rdna4_family_arch(arch) || vdst > 254 || vaddr > 255 || vdata > 254)
     return std::nullopt;
-  return std::array<uint32_t, 2>{
-      0xD9B40000u | byte_offset,
-      static_cast<uint32_t>(vaddr) | (static_cast<uint32_t>(vdata) << 8u) |
-          (static_cast<uint32_t>(vdata + 1u) << 16u) | (static_cast<uint32_t>(vdst) << 24u)};
+  return std::array<uint32_t, 2>{0xD9B40000u | byte_offset,
+                                 static_cast<uint32_t>(vaddr) |
+                                     (static_cast<uint32_t>(vdata) << 8u) |
+                                     (static_cast<uint32_t>(vdst) << 24u)};
 }
 
 /// @brief Encode VOP2 `v_min_u32 vdst, literal, vsrc1`.
@@ -264,7 +264,7 @@ build_v_mbcnt_lo_u32_b32(uint16_t vdst, uint16_t src0, uint16_t src1, rj_code_ar
   if (!is_rdna4_family_arch(arch) || vdst > 255 || src0 > 511 || src1 > 511)
     return std::nullopt;
   return std::array<uint32_t, 2>{0xD71F0000u | static_cast<uint32_t>(vdst),
-                                 0x02000000u | (static_cast<uint32_t>(src1) << 9u) | src0};
+                                 (static_cast<uint32_t>(src1) << 9u) | src0};
 }
 
 /// @brief Encode RDNA4 `v_mbcnt_hi_u32_b32 vdst, src0, src1`.
@@ -273,7 +273,7 @@ build_v_mbcnt_hi_u32_b32(uint16_t vdst, uint16_t src0, uint16_t src1, rj_code_ar
   if (!is_rdna4_family_arch(arch) || vdst > 255 || src0 > 511 || src1 > 511)
     return std::nullopt;
   return std::array<uint32_t, 2>{0xD7200000u | static_cast<uint32_t>(vdst),
-                                 0x02000000u | (static_cast<uint32_t>(src1) << 9u) | src0};
+                                 (static_cast<uint32_t>(src1) << 9u) | src0};
 }
 
 /// @brief Encode RDNA4 `v_cmp_eq_u32_e32 vcc_lo, src0, vsrc1`.

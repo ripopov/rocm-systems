@@ -143,13 +143,15 @@ TEST(InstructionBuilder, BuildVMbcntLaneIdSequence) {
       /*vdst=*/13, /*src0=*/0xC1, scalar_positive_inline_u32(0), ROCJITSU_CODE_ARCH_RDNA4);
   ASSERT_TRUE(low);
   EXPECT_EQ((*low)[0], 0xD71F000Du);
-  EXPECT_EQ((*low)[1], 0x020100C1u);
+  // Pinned against LLVM's gfx1201 assembler. Reserved bit 25 must remain zero;
+  // setting it produces an illegal instruction on RDNA4.
+  EXPECT_EQ((*low)[1], 0x000100C1u);
 
   const auto high = build_v_mbcnt_hi_u32_b32(
       /*vdst=*/13, /*src0=*/0xC1, vector_source_vgpr(13), ROCJITSU_CODE_ARCH_RDNA4);
   ASSERT_TRUE(high);
   EXPECT_EQ((*high)[0], 0xD720000Du);
-  EXPECT_EQ((*high)[1], 0x02021AC1u);
+  EXPECT_EQ((*high)[1], 0x00021AC1u);
 
   auto decoder = Decoder::create(ROCJITSU_CODE_ARCH_RDNA4);
   ASSERT_NE(decoder, nullptr);
@@ -465,8 +467,8 @@ TEST(InstructionBuilder, BuildGfx1250MoiBarrierRecordRecipeEncodings) {
   ASSERT_TRUE(save_scc);
   ASSERT_TRUE(restore_scc);
   ASSERT_TRUE(capacity_skip);
-  EXPECT_EQ(*mbcnt_low, (std::array<uint32_t, 2>{0xD71F000Du, 0x020100C1u}));
-  EXPECT_EQ(*mbcnt_high, (std::array<uint32_t, 2>{0xD720000Du, 0x02021AC1u}));
+  EXPECT_EQ(*mbcnt_low, (std::array<uint32_t, 2>{0xD71F000Du, 0x000100C1u}));
+  EXPECT_EQ(*mbcnt_high, (std::array<uint32_t, 2>{0xD720000Du, 0x00021AC1u}));
   EXPECT_EQ(*cmp_eq, 0x7C941A80u);
   EXPECT_EQ(*cmp_gt, 0x7C981484u);
   EXPECT_EQ(*mov_literal, (std::array<uint32_t, 3>{0xD581000Du, 0x000000FFu, 0x12345678u}));
