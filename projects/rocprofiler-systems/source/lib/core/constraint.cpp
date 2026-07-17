@@ -228,7 +228,7 @@ spec::spec(const std::string& _line)
         .value_or(0.0)
 }
 {
-    auto _delim = rocprofsys::common::delimit(_line, ":");
+    auto _delim = rocprofsys::delimit(_line, ":");
     if(!_delim.empty()) delay = utility::convert<double>(_delim.at(0));
     if(_delim.size() > 1) duration = utility::convert<double>(_delim.at(1));
     if(_delim.size() > 2) repeat = utility::convert<std::uint64_t>(_delim.at(2));
@@ -315,7 +315,7 @@ get_trace_specs()
                 .value_or("");
         if(!_periods_v.empty())
         {
-            for(auto itr : rocprofsys::common::delimit(_periods_v, " ;\t\n"))
+            for(auto itr : rocprofsys::delimit(_periods_v, " ;\t\n"))
                 _v.emplace_back(itr);
         }
     }
