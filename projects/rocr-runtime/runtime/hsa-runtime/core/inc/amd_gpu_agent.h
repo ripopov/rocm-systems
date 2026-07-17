@@ -474,10 +474,11 @@ class GpuAgent : public GpuAgentInt {
   /// @brief Force a WC flush on PCIe devices by doing a write and then read-back
   __forceinline void PcieWcFlush(void *ptr, size_t size) const {
     if (!xgmi_cpu_gpu_) {
-      _mm_sfence();
-      *((uint8_t*)ptr + size - 1) = *((uint8_t*)ptr + size - 1);
-      _mm_mfence();
-      auto readback = *(reinterpret_cast<volatile uint8_t*>(ptr) + size - 1);
+      host::StoreFence();
+      volatile uint8_t* last_byte = reinterpret_cast<volatile uint8_t*>(ptr) + size - 1;
+      *last_byte = *last_byte;
+      host::FullFence();
+      auto readback = *last_byte;
       UNUSED(readback);
     }
   }

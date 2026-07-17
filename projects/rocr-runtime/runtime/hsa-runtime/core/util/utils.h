@@ -60,18 +60,7 @@
 #include <thread>
 #include <locale>
 
-#if defined(__GNUC__)
-#if defined(__i386__) || defined(__x86_64__)
-#include <x86intrin.h>
-#elif defined(__powerpc64__) || defined(__PPC64__)
-// PowerPC compatibility shim for x86 intrinsics
-#define NO_WARN_X86_INTRINSICS
-#include <x86intrin.h>
-#endif
-#endif
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
-#include "intrin.h"
-#endif
+#include "host_primitives.h"
 
 namespace rocr {
 extern FILE* log_file;
@@ -428,6 +417,8 @@ static __forceinline std::string& trim(std::string& s) { return ltrim(rtrim(s));
 /// @param: offset(Input), offset of base address to flush
 /// @param: len(Input), length of buffer to flush
 inline void FlushCpuCache(const void* base, size_t offset, size_t len) {
+  if (len == 0) return;
+
   static long cacheline_size = 0;
 
   if (!cacheline_size) {
@@ -449,7 +440,7 @@ inline void FlushCpuCache(const void* base, size_t offset, size_t len) {
   cur += offset;
   uintptr_t lastline = (uintptr_t)(cur + len - 1) | (cacheline_size - 1);
   do {
-    _mm_clflush((const void*)cur);
+    host::FlushCacheLine(cur);
     cur += cacheline_size;
   } while (cur <= (const char*)lastline);
 }
