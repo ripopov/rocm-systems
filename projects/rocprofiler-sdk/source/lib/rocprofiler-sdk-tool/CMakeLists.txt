@@ -12,6 +12,11 @@ set(TOOL_SOURCES config.cpp graph_stack.cpp main.c tool.cpp stream_stack.cpp)
 add_library(rocprofiler-sdk-tool SHARED)
 target_sources(rocprofiler-sdk-tool PRIVATE ${TOOL_SOURCES} ${TOOL_HEADERS})
 
+if(ROCPROFILER_DISABLE_TRACE_DECODER)
+    target_compile_definitions(rocprofiler-sdk-tool
+                               PRIVATE ROCPROFILER_DISABLE_TRACE_DECODER=1)
+endif()
+
 target_link_libraries(
     rocprofiler-sdk-tool
     PRIVATE rocprofiler-sdk::rocprofiler-sdk-shared-library
@@ -25,8 +30,12 @@ target_link_libraries(
             rocprofiler-sdk::rocprofiler-sdk-otf2
             rocprofiler-sdk::rocprofiler-sdk-dw
             rocprofiler-sdk::rocprofiler-sdk-amd-comgr
-            rocprofiler-sdk::rocprofiler-sdk-att-parser
             rocprofiler-sdk::rocprofiler-sdk-sqlite3)
+
+if(NOT ROCPROFILER_DISABLE_TRACE_DECODER)
+    target_link_libraries(rocprofiler-sdk-tool
+                          PRIVATE rocprofiler-sdk::rocprofiler-sdk-att-parser)
+endif()
 
 set_target_properties(
     rocprofiler-sdk-tool
