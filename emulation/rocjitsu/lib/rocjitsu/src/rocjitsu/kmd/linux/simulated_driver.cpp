@@ -1852,7 +1852,14 @@ int SimulatedDriver::claim_fd(int real_fd) {
     init_reserved_fd_range();
   int vfd = next_reserved_fd_++;
   assert(vfd < reserved_fd_base_ + kReservedFdCount && "reserved fd range exhausted");
+  // aarch64 and the other newer ports never got dup2. dup3 with flags 0 is
+  // equivalent here: it only differs by rejecting oldfd == newfd, and vfd comes
+  // from the reserved high range, so it never collides with real_fd.
+#ifdef SYS_dup2
   syscall(SYS_dup2, real_fd, vfd);
+#else
+  syscall(SYS_dup3, real_fd, vfd, 0);
+#endif
   syscall(SYS_close, real_fd);
   return vfd;
 }
