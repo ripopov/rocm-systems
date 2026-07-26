@@ -223,6 +223,20 @@ private:
     pid_t client_pid = 0;
   };
 
+  /// @brief Upper bound of the host user address space, for passthrough only.
+  /// @details Passthrough dereferences a GPU VA as a host pointer, so the VA
+  /// must first be checked against the host's user range. That range is
+  /// architecture-specific: x86-64 with 4-level paging tops out at 2^47, while
+  /// aarch64 with a 48-bit VA gives user space the full low 2^48. Hardcoding
+  /// the x86-64 bound made every aarch64 address above 128 TiB, where Linux
+  /// places PIE images and top-down mmap regions, fail translation and fall
+  /// through to sparse memory instead of reaching the real host page.
+#if defined(__aarch64__)
+  static constexpr uint64_t kUserSpaceLimit = 1ULL << 48;
+#else
+  static constexpr uint64_t kUserSpaceLimit = 1ULL << 47;
+#endif
+
   uint8_t *translate(uint64_t addr, uint32_t vmid) const {
     if (vmid == 0)
       return passthrough_ ? reinterpret_cast<uint8_t *>(addr & ~PAGE_MASK) : nullptr;
@@ -237,7 +251,6 @@ private:
           return pt_it->second.host_ptr;
       }
     }
-    static constexpr uint64_t kUserSpaceLimit = 0x800000000000ULL;
     if (passthrough_ && addr < kUserSpaceLimit)
       return reinterpret_cast<uint8_t *>(addr & ~PAGE_MASK);
     return nullptr;
