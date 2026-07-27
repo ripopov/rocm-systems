@@ -1,0 +1,15 @@
+ROCJITSU_KMD_SERVER_1.0 {
+  global:
+    rj_kmd_server_create;
+    rj_kmd_server_destroy;
+    rj_kmd_server_listen;
+    rj_kmd_server_stop_accepting;
+    rj_kmd_server_poll_fds;
+    rj_kmd_server_process_fd;
+    rj_kmd_server_notification_fd;
+    rj_kmd_server_drain_doorbells;
+    rj_kmd_server_post_interrupt;
+    rj_kmd_server_get_stats;
+  local:
+    *;
+};

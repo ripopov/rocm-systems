@@ -13,6 +13,7 @@ target_include_directories(
 target_link_libraries(
     rocjitsu_bin
     PRIVATE
+        rocjitsu_kmd_device
         rocjitsu_kmd
         rocjitsu_analysis
         rocjitsu_code

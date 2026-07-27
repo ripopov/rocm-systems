@@ -77,9 +77,15 @@ public:
     uint64_t gpu_va = 0;
     uint64_t size = 0;
     void *host_ptr = nullptr;
+    void *mapping_base = nullptr;
+    uint64_t mapping_length = 0;
     uint32_t flags = 0;
     uint64_t handle = 0;
+    uint64_t backend_allocation_id = 0;
+    uint64_t device_paddr = 0;
     int memfd = -1;
+    uint64_t backing_offset = 0;
+    uint64_t backing_length = 0;
     uint32_t gpu_id = 0;
     bool user_va = false;
     bool imported = false;
@@ -107,6 +113,7 @@ public:
   struct SvmRange {
     uint64_t size = 0;
     std::unordered_map<uint32_t, uint32_t> attributes;
+    GpuAllocation allocation;
   };
 
   /// @brief Runtime enable state.

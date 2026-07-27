@@ -291,7 +291,8 @@ std::vector<uint8_t> make_minimal_amdgpu_elf_with_load_segments() {
   phdrs[1].p_filesz = rodata_size;
   phdrs[1].p_memsz = rodata_size;
   phdrs[1].p_align = load_align;
-  std::memcpy(image.data() + ehdr.e_phoff, phdrs.data(), phdrs.size() * sizeof(Elf64_Phdr));
+  std::memcpy(&image.at(static_cast<size_t>(ehdr.e_phoff)), phdrs.data(),
+              phdrs.size() * sizeof(Elf64_Phdr));
 
   const std::array<uint32_t, 2> text_words = {0xBF800000u, 0xBF800000u};
   std::memcpy(image.data() + text_offset, text_words.data(), text_size);

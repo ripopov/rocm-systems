@@ -5,6 +5,7 @@
 /// @brief Tests for SimulatedDriver creation, open/close, and topology generation.
 
 #include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/linux/device_info.h"
 #include "rocjitsu/kmd/linux/simulated_driver.h"
 #include "rocjitsu/vm/virtual_machine.h"
 
@@ -42,7 +43,8 @@ TestVM create_test_vm() {
   auto root = t.loaded.take_root();
   root.release();
   auto vm = std::make_unique<rocjitsu::VirtualMachine>(std::unique_ptr<rocjitsu::SoC>(soc));
-  vm->driver()->setup_topology(t.loaded.device, soc->num_xcds());
+  vm->driver()->setup_topology(
+      rocjitsu::kmd::deviceInfoFromConfig(t.loaded.device, soc->num_xcds()));
 
   t.engine->topology().set_root(std::move(vm));
   t.loaded.wire_links(t.engine->topology());

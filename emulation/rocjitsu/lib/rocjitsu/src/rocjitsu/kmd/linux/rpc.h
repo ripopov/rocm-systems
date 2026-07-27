@@ -49,7 +49,7 @@ struct RpcHeader {
 };
 
 /// @brief RPC protocol version. Increment when making breaking changes.
-inline constexpr uint32_t kRpcProtocolVersion = 3;
+inline constexpr uint32_t kRpcProtocolVersion = 5;
 
 /// @brief Fixed-size GPU metadata sent during daemon handshake.
 using RpcGpuInfo = ::rj_vm_gpu_info_t;
@@ -80,9 +80,16 @@ struct RpcMmapRequest {
   int64_t offset;  ///< KFD mmap offset encoding (type + gpu_id + handle).
 };
 
+/// @brief Bounds of an allocation within a transferred shared-backing FD.
+struct RpcBackingDescriptor {
+  uint64_t backing_offset;
+  uint64_t backing_length;
+};
+
 /// @brief mmap response payload (when opcode == RPC_MMAP).
 struct RpcMmapResponse {
   uint64_t mapped_addr; ///< Address the daemon mapped at (informational).
+  RpcBackingDescriptor backing;
 };
 
 /// @brief munmap request payload (when opcode == RPC_MUNMAP).
@@ -96,7 +103,8 @@ static_assert(sizeof(RpcGpuInfo) == 312);
 static_assert(sizeof(RpcHandshakeResponse) == 328);
 static_assert(sizeof(RpcIoctlRequest) == 8);
 static_assert(sizeof(RpcMmapRequest) == 32);
-static_assert(sizeof(RpcMmapResponse) == 8);
+static_assert(sizeof(RpcBackingDescriptor) == 16);
+static_assert(sizeof(RpcMmapResponse) == 24);
 static_assert(sizeof(RpcMunmapRequest) == 16);
 
 /// @brief Send a message with optional ancillary file descriptors.

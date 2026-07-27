@@ -3,6 +3,7 @@
 
 #include "rocjitsu/vm/virtual_machine.h"
 
+#include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/simulated_driver.h"
 
 #include <cassert>
@@ -25,7 +26,10 @@ VirtualMachine::VirtualMachine(std::unique_ptr<SoC> soc, bool daemon_mode)
   set_weight(0);
   adopt_children(*soc);
   add_child(std::move(soc));
-  driver_ = std::make_unique<SimulatedDriver>(*soc_, daemon_mode);
+  std::vector<std::shared_ptr<kmd::DeviceBackend>> backends;
+  backends.push_back(kmd::makeSimdojoDeviceBackend(*soc_, soc_->gpu_id()));
+  driver_ =
+      std::make_unique<SimulatedDriver>(std::move(backends), daemon_mode);
 }
 
 VirtualMachine::VirtualMachine(std::vector<std::unique_ptr<SoC>> socs,
@@ -42,7 +46,15 @@ VirtualMachine::VirtualMachine(std::vector<std::unique_ptr<SoC>> socs,
     adopt_children(*socs[i]);
     add_child(std::move(socs[i]));
   }
-  driver_ = std::make_unique<SimulatedDriver>(ptrs, std::move(gpu_ids), daemon_mode);
+  std::vector<std::shared_ptr<kmd::DeviceBackend>> backends;
+  backends.reserve(ptrs.size());
+  for (size_t i = 0; i < ptrs.size(); ++i) {
+    uint32_t gpu_id =
+        i < gpu_ids.size() ? gpu_ids[i] : ptrs[i]->gpu_id();
+    backends.push_back(kmd::makeSimdojoDeviceBackend(*ptrs[i], gpu_id));
+  }
+  driver_ =
+      std::make_unique<SimulatedDriver>(std::move(backends), daemon_mode);
 }
 
 VirtualMachine::~VirtualMachine() = default;

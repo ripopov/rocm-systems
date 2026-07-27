@@ -212,108 +212,169 @@ if(RJ_CLANG_TIDY)
     endif()
 endif()
 
-# Third-party dependencies (fetched into third_party/).
-# Third-party dependencies (fetched into third_party/).
-# Third-party dependencies (fetched into third_party/ by default).
-# Override with -DFETCHCONTENT_BASE_DIR=/path for container builds.
-if(NOT FETCHCONTENT_BASE_DIR)
-    set(FETCHCONTENT_BASE_DIR ${PROJECT_SOURCE_DIR}/third_party)
+option(
+    RJ_KMD_SERVER_ONLY
+    "Build only the embeddable KMD server without simulator dependencies"
+    OFF
+)
+
+if(NOT RJ_KMD_SERVER_ONLY)
+    # Third-party dependencies are fetched into third_party/ by default.
+    # Override with -DFETCHCONTENT_BASE_DIR=/path for container builds.
+    if(NOT FETCHCONTENT_BASE_DIR)
+        set(FETCHCONTENT_BASE_DIR ${PROJECT_SOURCE_DIR}/third_party)
+    endif()
+    include(FetchContent)
+
+    # Google Test
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.15.2
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+
+    # FlatBuffers - serialization for config, checkpoint, and wire format.
+    FetchContent_Declare(
+        flatbuffers
+        GIT_REPOSITORY https://github.com/google/flatbuffers.git
+        GIT_TAG v24.3.25
+    )
+    set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(FLATBUFFERS_INSTALL OFF CACHE BOOL "" FORCE)
+    set(FLATBUFFERS_BUILD_FLATLIB ON CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(googletest flatbuffers)
+
+    include(rj_flatbuffers)
 endif()
-include(FetchContent)
-
-# Google Test
-FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-
-# FlatBuffers - serialization for config, checkpoint, and wire format.
-FetchContent_Declare(
-    flatbuffers
-    GIT_REPOSITORY https://github.com/google/flatbuffers.git
-    GIT_TAG v24.3.25
-)
-set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(FLATBUFFERS_INSTALL OFF CACHE BOOL "" FORCE)
-set(FLATBUFFERS_BUILD_FLATLIB ON CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(googletest flatbuffers)
-
-include(rj_flatbuffers)
 
 # Set include paths before adding subdirectories so all targets can find them.
 set(ROCJITSU_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/lib/rocjitsu/include)
 set(ROCJITSU_SRC_DIR ${PROJECT_SOURCE_DIR}/lib/rocjitsu/src)
 
-# Libraries
-add_subdirectory(lib/util)
-add_subdirectory(lib/simdojo)
-add_subdirectory(lib/rocjitsu)
-add_subdirectory(lib/rocjitsu/src/rocjitsu/vm/plugins)
+if(NOT RJ_KMD_SERVER_ONLY)
+    # Libraries
+    add_subdirectory(lib/util)
+    add_subdirectory(lib/simdojo)
+    add_subdirectory(lib/rocjitsu)
+    add_subdirectory(lib/rocjitsu/src/rocjitsu/vm/plugins)
 
-# Main shared library - assembles all object libraries.
-add_library(rocjitsu_shared SHARED)
-set_target_properties(rocjitsu_shared PROPERTIES OUTPUT_NAME rocjitsu)
-target_link_libraries(
-    rocjitsu_shared
-    PRIVATE
-        rocjitsu_analysis
-        rocjitsu_code
-        rocjitsu_isa
-        rocjitsu_isa_cdna1
-        rocjitsu_isa_cdna2
-        rocjitsu_isa_cdna3
-        rocjitsu_isa_cdna4
-        rocjitsu_isa_rdna1
-        rocjitsu_isa_rdna2
-        rocjitsu_isa_rdna3
-        rocjitsu_isa_rdna3_5
-        rocjitsu_isa_rdna4
-        rocjitsu_isa_gfx1250
-        rocjitsu_isa_risc_v
-        simdojo
-        rocjitsu_kmd
-        rocjitsu_vm
-        rocjitsu_vm_amdgpu
-        rocjitsu_plugin_logging
-        rocjitsu_plugin_race_detector
-        rocjitsu_vm_risc_v
-        rocjitsu_config
-        util
-        flatbuffers
-        Threads::Threads
-)
-target_include_directories(
-    rocjitsu_shared
-    PRIVATE ${ROCJITSU_INCLUDE_DIR} ${ROCJITSU_SRC_DIR} ${GENERATED_DIR}
-)
-target_include_directories(rocjitsu_shared SYSTEM PRIVATE ${HSA_INCLUDE_DIR})
-
-# Linux-only: KMD interposer (LD_PRELOAD shim) and its dependencies.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(
+    # Main shared library - assembles all object libraries.
+    add_library(rocjitsu_shared SHARED)
+    set_target_properties(rocjitsu_shared PROPERTIES OUTPUT_NAME rocjitsu)
+    target_link_libraries(
         rocjitsu_shared
-        PRIVATE ${ROCJITSU_SRC_DIR}/rocjitsu/kmd/linux/interposer.cpp
+        PRIVATE
+            rocjitsu_analysis
+            rocjitsu_code
+            rocjitsu_isa
+            rocjitsu_isa_cdna1
+            rocjitsu_isa_cdna2
+            rocjitsu_isa_cdna3
+            rocjitsu_isa_cdna4
+            rocjitsu_isa_rdna1
+            rocjitsu_isa_rdna2
+            rocjitsu_isa_rdna3
+            rocjitsu_isa_rdna3_5
+            rocjitsu_isa_rdna4
+            rocjitsu_isa_gfx1250
+            rocjitsu_isa_risc_v
+            simdojo
+            rocjitsu_kmd_device
+            rocjitsu_kmd
+            rocjitsu_vm
+            rocjitsu_vm_amdgpu
+            rocjitsu_plugin_logging
+            rocjitsu_plugin_race_detector
+            rocjitsu_vm_risc_v
+            rocjitsu_config
+            util
+            flatbuffers
+            Threads::Threads
     )
-    target_include_directories(rocjitsu_shared PRIVATE ${DRM_INCLUDE_DIR})
-    target_compile_definitions(rocjitsu_shared PRIVATE _GNU_SOURCE)
-    target_link_libraries(rocjitsu_shared PRIVATE dl)
+    target_include_directories(
+        rocjitsu_shared
+        PRIVATE ${ROCJITSU_INCLUDE_DIR} ${ROCJITSU_SRC_DIR} ${GENERATED_DIR}
+    )
+    target_include_directories(rocjitsu_shared SYSTEM PRIVATE ${HSA_INCLUDE_DIR})
+
+    # Linux-only: KMD interposer (LD_PRELOAD shim) and its dependencies.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(
+            rocjitsu_shared
+            PRIVATE ${ROCJITSU_SRC_DIR}/rocjitsu/kmd/linux/interposer.cpp
+        )
+        target_include_directories(rocjitsu_shared PRIVATE ${DRM_INCLUDE_DIR})
+        target_compile_definitions(rocjitsu_shared PRIVATE _GNU_SOURCE)
+        target_link_libraries(rocjitsu_shared PRIVATE dl)
+    endif()
+
+    add_dependencies(rocjitsu_shared flatbuffers_schemas)
 endif()
 
-add_dependencies(rocjitsu_shared flatbuffers_schemas)
-
-# Developer and test workflow tools.
-add_subdirectory(tools)
-
+# Embeddable KMD server. This target intentionally excludes simdojo, the ISA
+# engines, FlatBuffers, the configuration loader, and the LD_PRELOAD
+# interposer. Its public surface is the versioned C header in
+# rocjitsu/kmd/server.h.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_subdirectory(tools/rocjitsu)
+    add_library(
+        rocjitsu_kmd_server
+        SHARED
+        lib/rocjitsu/src/rocjitsu/kmd/device/gem5_device_backend.cpp
+        lib/rocjitsu/src/rocjitsu/kmd/linux/events.cpp
+        lib/rocjitsu/src/rocjitsu/kmd/linux/kmd_rpc_server.cpp
+        lib/rocjitsu/src/rocjitsu/kmd/linux/simulated_driver.cpp
+        lib/rocjitsu/src/rocjitsu/kmd/linux/sysfs.cpp
+        lib/rocjitsu/src/rocjitsu/kmd/linux/transport.cpp
+        lib/rocjitsu/src/rocjitsu/kmd/server.cpp
+    )
+    set_target_properties(
+        rocjitsu_kmd_server
+        PROPERTIES
+            OUTPUT_NAME rocjitsu_kmd_server
+            VERSION 1.0.0
+            SOVERSION 1
+            CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN ON
+    )
+    target_compile_definitions(rocjitsu_kmd_server PRIVATE _GNU_SOURCE)
+    target_compile_options(
+        rocjitsu_kmd_server
+        PRIVATE -Wall -Wextra -Wpedantic -Werror
+    )
+    target_include_directories(
+        rocjitsu_kmd_server
+        PUBLIC
+            $<BUILD_INTERFACE:${ROCJITSU_INCLUDE_DIR}>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+            ${ROCJITSU_SRC_DIR}
+            ${PROJECT_SOURCE_DIR}/lib/util/include
+            ${HSA_INCLUDE_DIR}
+    )
+    target_link_libraries(rocjitsu_kmd_server PRIVATE Threads::Threads)
+    if(UNIX AND NOT APPLE)
+        target_link_options(
+            rocjitsu_kmd_server
+            PRIVATE
+                "LINKER:--version-script=${PROJECT_SOURCE_DIR}/lib/rocjitsu/src/rocjitsu/kmd/server.exports"
+        )
+    endif()
 endif()
-# Tests and scaling tools.
-if(BUILD_TESTING)
-    add_subdirectory(tests)
+
+if(NOT RJ_KMD_SERVER_ONLY)
+    # Developer and test workflow tools.
+    add_subdirectory(tools)
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_subdirectory(tools/rocjitsu)
+    endif()
+    # Tests and scaling tools.
+    if(BUILD_TESTING)
+        add_subdirectory(tests)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -328,24 +389,35 @@ install(
     PATTERN "*.h"
 )
 
-# Libraries: lib/
-install(
-    TARGETS rocjitsu_shared rocjitsu_hooks
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+if(NOT RJ_KMD_SERVER_ONLY)
+    # Libraries: lib/
+    install(
+        TARGETS rocjitsu_shared rocjitsu_hooks
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(TARGET rocjitsu_kmd_server)
+    install(
+        TARGETS rocjitsu_kmd_server
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
+
+if(NOT RJ_KMD_SERVER_ONLY AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(TARGETS rocjitsu_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
-# Config files and schemas: share/rocjitsu/
-install(
-    DIRECTORY configs/
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/rocjitsu/configs
-)
-install(
-    DIRECTORY schemas/
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/rocjitsu/schemas
-    FILES_MATCHING
-    PATTERN "*.fbs"
-)
+if(NOT RJ_KMD_SERVER_ONLY)
+    # Config files and schemas: share/rocjitsu/
+    install(
+        DIRECTORY configs/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/rocjitsu/configs
+    )
+    install(
+        DIRECTORY schemas/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/rocjitsu/schemas
+        FILES_MATCHING
+        PATTERN "*.fbs"
+    )
+endif()

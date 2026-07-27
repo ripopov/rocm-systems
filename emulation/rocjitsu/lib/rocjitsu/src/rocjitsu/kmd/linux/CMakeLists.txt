@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 rj_add_object_library(rocjitsu_kmd
+    device_info.cpp
     events.cpp
+    kmd_rpc_server.cpp
     remote_driver.cpp
     simulated_driver.cpp
     sysfs.cpp

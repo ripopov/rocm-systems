@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <linux/mman.h>
+#include <limits>
 #ifndef MADV_POPULATE_WRITE
 #define MADV_POPULATE_WRITE 23
 #endif
@@ -119,9 +120,16 @@ bool RemoteDriver::find_memfd_for_addr(void *addr, size_t length, int *memfd_out
   auto target = reinterpret_cast<uint64_t>(addr);
   std::lock_guard<std::mutex> lock(rpc_mutex_);
   for (const auto &r : alloc_ranges_) {
-    if (target >= r.va && target + length <= r.va + r.size) {
+    if (target >= r.va && length <= UINT64_MAX - target &&
+        r.size <= UINT64_MAX - r.va &&
+        target + length <= r.va + r.size) {
+      uint64_t relative = target - r.va;
+      if (relative > UINT64_MAX - r.backing_offset ||
+          relative + length > r.backing_length)
+        continue;
       *memfd_out = r.memfd;
-      *offset_out = static_cast<off_t>(target - r.va);
+      *offset_out =
+          static_cast<off_t>(r.backing_offset + relative);
       return true;
     }
   }
@@ -133,9 +141,15 @@ RemoteDriver::RemoteDriver(int sock_fd) : sock_(sock_fd) {
 }
 
 RemoteDriver::~RemoteDriver() {
-  for (auto &[handle, fd] : handle_memfds_) {
-    if (fd >= 0)
-      syscall(SYS_close, fd);
+  for (auto &[handle, backing] : handle_memfds_) {
+    (void)handle;
+    if (backing.fd >= 0)
+      syscall(SYS_close, backing.fd);
+  }
+  for (auto &[start, backing] : svm_memfds_) {
+    (void)start;
+    if (backing.fd >= 0)
+      syscall(SYS_close, backing.fd);
   }
   if (sock_ >= 0)
     syscall(SYS_close, sock_);
@@ -237,11 +251,18 @@ int RemoteDriver::close() {
       sock_ = -1;
     }
 
-    for (auto &[handle, fd] : handle_memfds_) {
-      if (fd >= 0)
-        syscall(SYS_close, fd);
+    for (auto &[handle, backing] : handle_memfds_) {
+      (void)handle;
+      if (backing.fd >= 0)
+        syscall(SYS_close, backing.fd);
     }
     handle_memfds_.clear();
+    for (auto &[start, backing] : svm_memfds_) {
+      (void)start;
+      if (backing.fd >= 0)
+        syscall(SYS_close, backing.fd);
+    }
+    svm_memfds_.clear();
     alloc_ranges_.clear();
     topology_path_.clear();
     drm_path_.clear();
@@ -253,8 +274,10 @@ int RemoteDriver::close() {
 }
 
 int RemoteDriver::ioctl(unsigned long request, void *arg) {
-  assert(sock_ >= 0 && "ioctl called on disconnected RemoteDriver");
-  assert(arg && "ioctl called with null arg");
+  if (!arg)
+    return -EINVAL;
+  if (closing_.load(std::memory_order_acquire))
+    return -EBADF;
 
   // WAIT_EVENTS is handled client-side to avoid rpc_mutex_ contention.
   // Multiple ROCR threads poll WAIT_EVENTS concurrently during init. If each
@@ -323,6 +346,8 @@ int RemoteDriver::ioctl(unsigned long request, void *arg) {
 
 int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   std::lock_guard<std::mutex> lock(rpc_mutex_);
+  if (closing_.load(std::memory_order_acquire) || sock_ < 0)
+    return -EBADF;
 
   size_t arg_size = 0;
   if (!validate_ioctl_arg_size(request, arg, arg_size))
@@ -413,11 +438,38 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
     return -1;
 
   auto *resp = reinterpret_cast<RpcHeader *>(resp_header_buf);
+  RpcBackingDescriptor response_backing{};
+  bool has_response_backing = false;
 
   if (resp->payload_bytes > 0) {
     std::vector<uint8_t> payload(resp->payload_bytes);
     if (!rpc_recv_exact(sock_, payload.data(), resp->payload_bytes))
       return -1;
+
+    bool expects_backing =
+        resp->result == 0 && num_fds > 0 && received_fds[0] >= 0 &&
+        (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU ||
+         request == AMDKFD_IOC_IPC_IMPORT_HANDLE ||
+         canonical_ioctl_request(request) == AMDKFD_IOC_SVM);
+    if (expects_backing) {
+      if (payload.size() < arg_size + sizeof(RpcBackingDescriptor)) {
+        syscall(SYS_close, received_fds[0]);
+        return -EPROTO;
+      }
+      std::memcpy(&response_backing, payload.data() + arg_size,
+                  sizeof(response_backing));
+      struct stat st {};
+      if (response_backing.backing_offset >
+              UINT64_MAX - response_backing.backing_length ||
+          fstat(received_fds[0], &st) != 0 ||
+          response_backing.backing_offset +
+                  response_backing.backing_length >
+              static_cast<uint64_t>(st.st_size)) {
+        syscall(SYS_close, received_fds[0]);
+        return -EPROTO;
+      }
+      has_response_backing = true;
+    }
 
     size_t copy_size = std::min(arg_size, static_cast<size_t>(resp->payload_bytes));
     std::memcpy(arg, payload.data(), copy_size);
@@ -466,66 +518,164 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
     }
   }
 
-  auto register_allocation = [&](uint64_t handle, uint64_t va_addr, uint64_t size, int memfd) {
-    handle_memfds_[handle] = memfd;
+  auto register_allocation = [&](uint64_t handle, uint64_t va_addr,
+                                 uint64_t size, int memfd,
+                                 const RpcBackingDescriptor &backing) {
+    handle_memfds_[handle] = {
+        .fd = memfd,
+        .offset = backing.backing_offset,
+        .length = backing.backing_length,
+    };
     if (va_addr != 0 && size > 0)
-      alloc_ranges_.push_back({va_addr, size, memfd});
+      alloc_ranges_.push_back(
+          {va_addr, size, memfd, backing.backing_offset,
+           backing.backing_length});
   };
 
-  auto promote_userptr = [&](uint64_t va_addr, uint64_t size, int memfd) {
-    auto *va = reinterpret_cast<void *>(va_addr);
-    auto length = static_cast<size_t>(size);
-
-    [[maybe_unused]] auto ft_rc = ftruncate(memfd, static_cast<off_t>(length));
-    fallocate(memfd, 0, 0, static_cast<off_t>(length));
-
-    constexpr size_t page_size = 4096;
-    size_t num_pages = (length + page_size - 1) / page_size;
-    std::vector<uint8_t> resident(num_pages);
-    auto mc_rc = syscall(SYS_mincore, va, length, resident.data());
-
-    auto *temp =
-        static_cast<uint8_t *>(safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, memfd, 0));
-    if (temp != MAP_FAILED) {
-      if (mc_rc == 0) {
-        auto *src = static_cast<uint8_t *>(va);
-        for (size_t i = 0; i < num_pages; ++i) {
-          if (resident[i] & 1) {
-            size_t off = i * page_size;
-            size_t n = std::min(page_size, length - off);
-            std::memcpy(temp + off, src + off, n);
-          }
-        }
-      }
-      syscall(SYS_munmap, temp, length);
+  auto promote_userptr = [&](uint64_t va_addr, uint64_t size, int memfd,
+                             uint64_t backing_offset,
+                             uint64_t backing_length) -> int {
+    constexpr uint64_t page_size = 4096;
+    constexpr uint64_t page_mask = page_size - 1;
+    const uint64_t page_va = va_addr & ~page_mask;
+    const uint64_t leading = va_addr - page_va;
+    if (!va_addr || !size ||
+        size > std::numeric_limits<uint64_t>::max() - leading) {
+      return -EINVAL;
+    }
+    const uint64_t logical_extent = leading + size;
+    if (logical_extent >
+        std::numeric_limits<uint64_t>::max() - page_mask) {
+      return -EOVERFLOW;
+    }
+    const uint64_t mapped_length =
+        (logical_extent + page_mask) & ~page_mask;
+    if ((backing_offset & page_mask) != 0 ||
+        mapped_length > backing_length ||
+        mapped_length > std::numeric_limits<size_t>::max() ||
+        backing_offset >
+            static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+      return -EPROTO;
     }
 
-    auto *mapped = safe_mmap(va, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, memfd, 0);
-    if (mapped != MAP_FAILED)
-      syscall(SYS_madvise, mapped, length, MADV_POPULATE_WRITE);
+    auto *page = reinterpret_cast<uint8_t *>(page_va);
+    auto *temp = static_cast<uint8_t *>(
+        safe_mmap(nullptr, static_cast<size_t>(mapped_length),
+                  PROT_WRITE, MAP_SHARED, memfd,
+                  static_cast<off_t>(backing_offset)));
+    if (temp == MAP_FAILED)
+      return -errno;
+
+    // Preserve every mapped byte in the containing pages, including bytes
+    // before and after the logical USERPTR range. ROCr reserves portions of
+    // its apertures with PROT_NONE before registering them, so make each page
+    // readable before copying it. An unmapped page makes mprotect fail and is
+    // left zero-filled in the new backing.
+    for (uint64_t offset = 0; offset < mapped_length;
+         offset += page_size) {
+      if (syscall(SYS_mprotect, page + offset, page_size,
+                  PROT_READ | PROT_WRITE) == 0) {
+        std::memcpy(temp + offset, page + offset, page_size);
+      }
+    }
+    syscall(SYS_munmap, temp, static_cast<size_t>(mapped_length));
+
+    auto *mapped = safe_mmap(
+        page, static_cast<size_t>(mapped_length), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_FIXED, memfd, static_cast<off_t>(backing_offset));
+    if (mapped == MAP_FAILED)
+      return -errno;
+    syscall(SYS_madvise, mapped, static_cast<size_t>(mapped_length),
+            MADV_POPULATE_WRITE);
+    return 0;
   };
 
   // Store memfd received from ALLOC_MEMORY for use in the subsequent mmap().
   // Also register the address range for anonymous MAP_FIXED interception.
   if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU && resp->result == 0) {
     auto *alloc_args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arg);
-    if (num_fds > 0 && received_fds[0] >= 0) {
-      register_allocation(alloc_args->handle, alloc_args->va_addr, alloc_args->size,
-                          received_fds[0]);
-
-      if (alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR)
-        promote_userptr(alloc_args->va_addr, alloc_args->size, received_fds[0]);
+    if (has_response_backing) {
+      constexpr uint64_t page_mask = 4095;
+      const bool is_userptr =
+          alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR;
+      const uint64_t userptr =
+          is_userptr ? alloc_args->mmap_offset : alloc_args->va_addr;
+      const uint64_t page_offset = userptr & page_mask;
+      if (is_userptr &&
+          (alloc_args->va_addr & page_mask) != page_offset) {
+        syscall(SYS_close, received_fds[0]);
+        return -EPROTO;
+      }
+      if (page_offset > response_backing.backing_length ||
+          alloc_args->size >
+              response_backing.backing_length - page_offset) {
+        syscall(SYS_close, received_fds[0]);
+        return -EPROTO;
+      }
+      uint64_t registered_va = alloc_args->va_addr;
+      uint64_t registered_size = alloc_args->size;
+      if (is_userptr) {
+        int result = promote_userptr(
+            userptr, alloc_args->size, received_fds[0],
+            response_backing.backing_offset,
+            response_backing.backing_length);
+        if (result != 0) {
+          syscall(SYS_close, received_fds[0]);
+          return result;
+        }
+        registered_va = userptr & ~page_mask;
+        registered_size = response_backing.backing_length;
+      }
+      register_allocation(
+          alloc_args->handle, registered_va, registered_size,
+          received_fds[0], response_backing);
     }
   }
 
   if (request == AMDKFD_IOC_IPC_IMPORT_HANDLE && resp->result == 0) {
     auto *import_args = static_cast<kfd_ioctl_ipc_import_handle_args *>(arg);
-    if (num_fds > 0 && received_fds[0] >= 0) {
-      uint64_t size = 0;
-      struct stat st {};
-      if (fstat(received_fds[0], &st) == 0)
-        size = static_cast<uint64_t>(st.st_size);
-      register_allocation(import_args->handle, import_args->va_addr, size, received_fds[0]);
+    if (has_response_backing) {
+      register_allocation(import_args->handle, import_args->va_addr,
+                          response_backing.backing_length, received_fds[0],
+                          response_backing);
+    }
+  }
+
+  if (canonical_ioctl_request(request) == AMDKFD_IOC_SVM &&
+      resp->result == 0) {
+    auto *svm_args = static_cast<kfd_ioctl_svm_args *>(arg);
+    if (svm_args->op == KFD_IOCTL_SVM_OP_SET_ATTR &&
+        has_response_backing) {
+      const uint64_t start = svm_args->start_addr;
+      if (auto existing = svm_memfds_.find(start);
+          existing != svm_memfds_.end()) {
+        syscall(SYS_close, received_fds[0]);
+      } else {
+        if (!start || !svm_args->size ||
+            (start & 4095) != 0 ||
+            (response_backing.backing_offset & 4095) != 0 ||
+            svm_args->size > response_backing.backing_length) {
+          syscall(SYS_close, received_fds[0]);
+          return -EPROTO;
+        }
+        int result = promote_userptr(
+            start, svm_args->size, received_fds[0],
+            response_backing.backing_offset,
+            response_backing.backing_length);
+        if (result != 0) {
+          syscall(SYS_close, received_fds[0]);
+          return result;
+        }
+        svm_memfds_[start] = {
+            .fd = received_fds[0],
+            .offset = response_backing.backing_offset,
+            .length = response_backing.backing_length,
+        };
+        alloc_ranges_.push_back(
+            {start, svm_args->size, received_fds[0],
+             response_backing.backing_offset,
+             response_backing.backing_length});
+      }
     }
   }
 
@@ -538,7 +688,7 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   if (request == AMDKFD_IOC_FREE_MEMORY_OF_GPU && resp->result == 0) {
     auto *free_args = static_cast<kfd_ioctl_free_memory_of_gpu_args *>(arg);
     if (auto it = handle_memfds_.find(free_args->handle); it != handle_memfds_.end()) {
-      int freed_memfd = it->second;
+      int freed_memfd = it->second.fd;
       std::erase_if(alloc_ranges_,
                     [freed_memfd](const AllocRange &r) { return r.memfd == freed_memfd; });
       syscall(SYS_close, freed_memfd);
@@ -551,10 +701,16 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
 
 void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t offset) {
   std::lock_guard<std::mutex> lock(rpc_mutex_);
+  if (closing_.load(std::memory_order_acquire) || sock_ < 0) {
+    errno = EBADF;
+    return MAP_FAILED;
+  }
 
   // Send the mmap RPC so the daemon creates its own mapping for GPU simulation.
   int memfd = -1;
-  int rc = send_mmap(addr, length, prot, flags, offset, &memfd);
+  RpcBackingDescriptor backing{};
+  int rc =
+      send_mmap(addr, length, prot, flags, offset, &memfd, &backing);
   if (rc != 0) {
     if (memfd >= 0)
       syscall(SYS_close, memfd);
@@ -567,11 +723,19 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
   uint64_t type = static_cast<uint64_t>(offset) & (0x3ULL << 62);
   if (mapping_memfd < 0 && type == 0) {
     uint64_t handle = static_cast<uint64_t>(offset) >> 12;
-    if (auto it = handle_memfds_.find(handle); it != handle_memfds_.end())
-      mapping_memfd = it->second;
+    if (auto it = handle_memfds_.find(handle); it != handle_memfds_.end()) {
+      mapping_memfd = it->second.fd;
+      backing.backing_offset = it->second.offset;
+      backing.backing_length = it->second.length;
+    }
   }
   if (mapping_memfd >= 0) {
-    [[maybe_unused]] auto ft_rc2 = ftruncate(mapping_memfd, static_cast<off_t>(length));
+    if (length > backing.backing_length) {
+      if (memfd >= 0)
+        syscall(SYS_close, memfd);
+      errno = EINVAL;
+      return MAP_FAILED;
+    }
 
     // Pre-copy committed pages (code objects) from the existing anonymous
     // reservation into the memfd before MAP_FIXED replaces them. Uses a temp
@@ -584,7 +748,8 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
         std::vector<uint8_t> page_resident(num_pages);
         auto mc_rc = syscall(SYS_mincore, addr, length, page_resident.data());
         auto *temp = static_cast<uint8_t *>(
-            safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, mapping_memfd, 0));
+            safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, mapping_memfd,
+                      static_cast<off_t>(backing.backing_offset)));
         if (temp != MAP_FAILED) {
           if (mc_rc == 0) {
             auto *src = static_cast<uint8_t *>(addr);
@@ -608,11 +773,14 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
     int mflags = MAP_SHARED;
     if (flags & MAP_FIXED)
       mflags |= MAP_FIXED;
-    auto *mapped = safe_mmap(addr, length, PROT_READ | PROT_WRITE, mflags, mapping_memfd, 0);
+    auto *mapped =
+        safe_mmap(addr, length, PROT_READ | PROT_WRITE, mflags,
+                  mapping_memfd,
+                  static_cast<off_t>(backing.backing_offset));
     if (mapped != MAP_FAILED)
       syscall(SYS_madvise, mapped, length, MADV_POPULATE_WRITE);
 
-    if (memfd >= 0 && memfd != mapping_memfd)
+    if (memfd >= 0)
       syscall(SYS_close, memfd);
     return mapped;
   }
@@ -628,6 +796,8 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
 
 int RemoteDriver::munmap(void *addr, size_t length) {
   std::lock_guard<std::mutex> lock(rpc_mutex_);
+  if (closing_.load(std::memory_order_acquire) || sock_ < 0)
+    return -EBADF;
 
   RpcMunmapRequest req = {};
   req.addr = reinterpret_cast<uint64_t>(addr);
@@ -656,7 +826,8 @@ int RemoteDriver::munmap(void *addr, size_t length) {
 }
 
 int RemoteDriver::send_mmap(void *addr, size_t length, int prot, int flags, off_t offset,
-                            int *memfd_out) {
+                            int *memfd_out,
+                            RpcBackingDescriptor *backing_out) {
   // rpc_mutex_ is already held by the caller (mmap()).
   RpcMmapRequest req = {};
   req.addr = reinterpret_cast<uint64_t>(addr);
@@ -687,6 +858,39 @@ int RemoteDriver::send_mmap(void *addr, size_t length, int prot, int flags, off_
 
   auto *resp = reinterpret_cast<RpcHeader *>(response_buffer);
   *memfd_out = (num_fds > 0) ? received_fds[0] : -1;
+  *backing_out = {};
+  if (resp->result != 0) {
+    if (*memfd_out >= 0) {
+      syscall(SYS_close, *memfd_out);
+      *memfd_out = -1;
+    }
+    return resp->result;
+  }
+  if (bytes_received != static_cast<ssize_t>(sizeof(response_buffer)) ||
+      resp->payload_bytes != sizeof(RpcMmapResponse)) {
+    if (*memfd_out >= 0) {
+      syscall(SYS_close, *memfd_out);
+      *memfd_out = -1;
+    }
+    return -EPROTO;
+  }
+  RpcMmapResponse mmap_response{};
+  std::memcpy(&mmap_response, response_buffer + sizeof(RpcHeader),
+              sizeof(mmap_response));
+  *backing_out = mmap_response.backing;
+  if (*memfd_out >= 0) {
+    struct stat st {};
+    if (backing_out->backing_offset >
+            UINT64_MAX - backing_out->backing_length ||
+        length > backing_out->backing_length ||
+        fstat(*memfd_out, &st) != 0 ||
+        backing_out->backing_offset + backing_out->backing_length >
+            static_cast<uint64_t>(st.st_size)) {
+      syscall(SYS_close, *memfd_out);
+      *memfd_out = -1;
+      return -EPROTO;
+    }
+  }
   return resp->result;
 }
 

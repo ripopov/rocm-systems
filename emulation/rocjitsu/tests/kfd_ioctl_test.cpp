@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/device/simdojo_device_backend.h"
+#include "rocjitsu/kmd/linux/device_info.h"
 #include "rocjitsu/kmd/linux/kfd_ioctl_utils.h"
 #include "rocjitsu/kmd/linux/simulated_driver.h"
 #include "rocjitsu/vm/virtual_machine.h"
@@ -50,7 +52,8 @@ uint32_t query_gb_addr_config(const std::string &config_path, uint32_t gpu_id) {
   engine.build();
   engine.register_as_primary();
 
-  driver->setup_topology(loaded.device, num_xcds);
+  driver->setup_topology(
+      rocjitsu::kmd::deviceInfoFromConfig(loaded.device, num_xcds));
   int fd = driver->open();
   if (fd < 0)
     return 0;
@@ -70,6 +73,7 @@ protected:
     auto root = loaded_.take_root();
     auto *soc = dynamic_cast<rocjitsu::SoC *>(root.get());
     ASSERT_NE(soc, nullptr);
+    soc_ = soc;
     auto num_xcds = soc->num_xcds();
 
     loaded_.engine_config.max_ticks = 0;
@@ -86,7 +90,8 @@ protected:
     engine_->build();
     engine_->register_as_primary();
 
-    driver_->setup_topology(loaded_.device, num_xcds);
+    driver_->setup_topology(
+        rocjitsu::kmd::deviceInfoFromConfig(loaded_.device, num_xcds));
     int fd = driver_->open();
     ASSERT_GE(fd, 0);
   }
@@ -98,6 +103,7 @@ protected:
 
   rocjitsu::config::LoadedConfig loaded_;
   std::unique_ptr<simdojo::SimulationEngine> engine_;
+  rocjitsu::SoC *soc_ = nullptr;
   rocjitsu::SimulatedDriver *driver_ = nullptr;
 };
 
@@ -190,7 +196,9 @@ TEST_F(KfdIoctlTest, GetTileConfigRejectsUnknownGpuId) {
 }
 
 TEST_F(KfdIoctlTest, GetTileConfigReturnsUnsupportedInDaemonMode) {
-  rocjitsu::SimulatedDriver daemon_driver(*loaded_.soc(), true);
+  std::vector<std::shared_ptr<rocjitsu::kmd::DeviceBackend>> backends{
+      rocjitsu::kmd::makeSimdojoDeviceBackend(*soc_, kGpuId)};
+  rocjitsu::SimulatedDriver daemon_driver(std::move(backends), true);
   uint32_t process_id = daemon_driver.open_process();
   ASSERT_NE(process_id, 0u);
 

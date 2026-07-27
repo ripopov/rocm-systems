@@ -13,6 +13,7 @@
 /// addresses ROCR's FMM expects.
 
 #include "rocjitsu/kmd/linux/sysfs.h"
+#include "rocjitsu/kmd/linux/rpc.h"
 #include "rocjitsu/vm/driver.h"
 
 #include <atomic>
@@ -97,7 +98,8 @@ public:
 
 private:
   int send_ioctl(unsigned long request, void *arg);
-  int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset, int *memfd_out);
+  int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset,
+                int *memfd_out, RpcBackingDescriptor *backing_out);
 
   int sock_ = -1;                    ///< Unix socket connection to the daemon.
   uint32_t next_id_ = 0;             ///< Monotonic request ID counter (for debugging).
@@ -113,8 +115,17 @@ private:
   /// socket writes without this lock, corrupting the RPC stream.
   std::mutex rpc_mutex_;
 
-  /// @brief Memfds received from the daemon during ALLOC_MEMORY, keyed by handle.
-  std::unordered_map<uint64_t, int> handle_memfds_;
+  struct BackingFd {
+    int fd = -1;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+  };
+
+  /// @brief Backing descriptors received during allocation, keyed by handle.
+  std::unordered_map<uint64_t, BackingFd> handle_memfds_;
+
+  /// @brief Shared backing for SVM registrations, keyed by page-aligned VA.
+  std::unordered_map<uint64_t, BackingFd> svm_memfds_;
 
   /// @brief Maps GPUVM addresses to allocation memfds for anonymous MAP_FIXED
   /// interception. When ROCR's FMM does anonymous MAP_FIXED at a GPUVM address
@@ -124,6 +135,8 @@ private:
     uint64_t va;
     uint64_t size;
     int memfd;
+    uint64_t backing_offset;
+    uint64_t backing_length;
   };
   std::vector<AllocRange> alloc_ranges_;
 };

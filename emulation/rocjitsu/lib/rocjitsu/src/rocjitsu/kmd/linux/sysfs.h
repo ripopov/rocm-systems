@@ -82,13 +82,20 @@ public:
     uint32_t sdma_fw_version = 0;
   };
 
-  Sysfs() = default;
+  explicit Sysfs(std::string runtime_root = {});
   ~Sysfs();
 
   Sysfs(const Sysfs &) = delete;
   Sysfs &operator=(const Sysfs &) = delete;
   Sysfs(Sysfs &&other) noexcept;
   Sysfs &operator=(Sysfs &&other) noexcept;
+
+  /// @brief Select a root visible to both daemon and attach containers.
+  ///
+  /// When empty, temporary private directories under /tmp retain the local
+  /// simulator behavior. A configured root owns only its topology and drm
+  /// children.
+  void set_runtime_root(std::string runtime_root);
 
   /// @brief Generate the sysfs topology directory for one or more GPUs.
   /// @param gpu GPU configuration to represent (single GPU).
@@ -117,6 +124,7 @@ public:
 private:
   std::string topology_dir_;
   std::string drm_dir_;
+  std::string runtime_root_;
   GpuInfo gpu_info_{};
 
   void write_file(const std::string &path, const std::string &content);

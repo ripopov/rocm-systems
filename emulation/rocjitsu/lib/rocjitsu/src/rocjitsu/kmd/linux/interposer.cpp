@@ -45,8 +45,10 @@ RJ_DIAGNOSTIC_POP
 #include <cstring>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <linux/memfd.h>
+#include <memory>
 #include <mutex>
 #include <signal.h>
 #include <sstream>
@@ -88,12 +90,23 @@ static int connect_to_daemon() {
 
 namespace {
 
+bool rj_backtrace_on_segv = false;
+
 void rj_sigsegv_handler(int, siginfo_t *, void *) {
+  if (rj_backtrace_on_segv) {
+    static constexpr char message[] = "\n[rocjitsu] caught SIGSEGV\n";
+    syscall(SYS_write, STDERR_FILENO, message, sizeof(message) - 1);
+    void *frames[128];
+    int count = backtrace(frames, sizeof(frames) / sizeof(frames[0]));
+    backtrace_symbols_fd(frames, count, STDERR_FILENO);
+    syscall(SYS_exit_group, 128 + SIGSEGV);
+  }
   signal(SIGSEGV, SIG_DFL);
   raise(SIGSEGV);
 }
 
 __attribute__((constructor)) void rj_install_signal_handler() {
+  rj_backtrace_on_segv = std::getenv("RJ_BACKTRACE") != nullptr;
   struct sigaction sa {};
   sa.sa_sigaction = rj_sigsegv_handler;
   sa.sa_flags = SA_SIGINFO;
@@ -179,7 +192,10 @@ public:
   /// the next open("/dev/kfd") creates a fresh connection.
   void reset_after_fork() {
     rj_vm_ = nullptr;
-    remote_.store(nullptr, std::memory_order_relaxed);
+    // The inherited RemoteDriver may contain mutexes owned by threads that do
+    // not exist in the child. Reconstruct the atomic in place so resetting a
+    // shared_ptr does not run that object's destructor after fork.
+    new (&remote_) std::atomic<std::shared_ptr<RemoteDriver>>{};
     remote_kfd_fd_.store(-1, std::memory_order_relaxed);
     remote_open_refs_.store(0, std::memory_order_relaxed);
     new (&init_mutex_) std::mutex();
@@ -203,27 +219,39 @@ public:
 
   std::unique_lock<std::mutex> lock_remote() { return std::unique_lock(remote_mutex_); }
 
-  RemoteDriver *remote() { return remote_.load(std::memory_order_acquire); }
+  std::shared_ptr<RemoteDriver> remote() {
+    return remote_.load(std::memory_order_acquire);
+  }
 
   int remote_kfd_fd() const { return remote_kfd_fd_.load(std::memory_order_acquire); }
 
-  RemoteDriver *remote_lookup(int fd) {
-    RemoteDriver *active_remote = remote_.load(std::memory_order_acquire);
+  std::shared_ptr<RemoteDriver> remote_lookup(int fd) {
+    auto active_remote = remote_.load(std::memory_order_acquire);
     return (fd >= 0 && fd == remote_kfd_fd_.load(std::memory_order_acquire) && active_remote)
                ? active_remote
-               : nullptr;
+               : std::shared_ptr<RemoteDriver>{};
   }
 
   std::string remote_topology_path() {
     std::lock_guard lock(remote_mutex_);
-    RemoteDriver *active_remote = remote_.load(std::memory_order_acquire);
+    auto active_remote = remote_.load(std::memory_order_acquire);
     return active_remote ? std::string(active_remote->topology_path()) : std::string{};
   }
 
   std::string remote_drm_path() {
     std::lock_guard lock(remote_mutex_);
-    RemoteDriver *active_remote = remote_.load(std::memory_order_acquire);
+    auto active_remote = remote_.load(std::memory_order_acquire);
     return active_remote ? std::string(active_remote->drm_path()) : std::string{};
+  }
+
+  bool copy_remote_gpu_info(Sysfs::GpuInfo &info) {
+    std::lock_guard lock(remote_mutex_);
+    auto active_remote = remote_.load(std::memory_order_acquire);
+    const auto *source = active_remote ? active_remote->gpu_info() : nullptr;
+    if (!source)
+      return false;
+    info = *source;
+    return true;
   }
 
   /// @brief True when a daemon-mode (remote) KFD connection is open.
@@ -233,7 +261,11 @@ public:
   /// @details Each live remote KFD fd (the primary plus every dup) holds one
   /// reference; the RPC connection is torn down only when the last reference is
   /// dropped. Mirrors SimulatedDriver's local open refcount for the daemon path.
-  void retain_remote_open() { remote_open_refs_.fetch_add(1, std::memory_order_acq_rel); }
+  void retain_remote_open() {
+    std::lock_guard lock(remote_mutex_);
+    assert(remote_.load(std::memory_order_acquire));
+    remote_open_refs_.fetch_add(1, std::memory_order_acq_rel);
+  }
 
   /// @brief Drop one remote open reference, tearing down the connection on the
   /// last release.
@@ -241,31 +273,38 @@ public:
   /// RemoteDriver::close()) so the daemon frees this client's process state,
   /// rather than leaking it until socket disconnect at process exit.
   void release_remote_open() {
+    std::lock_guard lock(remote_mutex_);
     int prev = remote_open_refs_.fetch_sub(1, std::memory_order_acq_rel);
     assert(prev > 0 && "remote open refcount underflow");
     if (prev == 1)
-      teardown_remote();
+      teardown_remote_locked();
   }
 
-  RemoteDriver *get_or_create_remote() {
+  std::shared_ptr<RemoteDriver> get_or_create_remote() {
     std::lock_guard lock(remote_mutex_);
-    RemoteDriver *active_remote = remote_.load(std::memory_order_acquire);
+    auto active_remote = remote_.load(std::memory_order_acquire);
     if (active_remote && remote_kfd_fd_.load(std::memory_order_acquire) >= 0) {
       // Re-open of an already-connected daemon: each open holds one reference,
       // mirroring SimulatedDriver::open() retaining the local process.
-      retain_remote_open();
+      remote_open_refs_.fetch_add(1, std::memory_order_acq_rel);
       return active_remote;
+    }
+    if (active_remote) {
+      active_remote->close();
+      remote_.store(nullptr, std::memory_order_release);
+      active_remote.reset();
     }
     int sock = connect_to_daemon();
     if (sock < 0)
-      return nullptr;
-    if (!active_remote) {
-      active_remote = new RemoteDriver(sock);
-      remote_.store(active_remote, std::memory_order_release);
-    }
+      return {};
+    active_remote = std::make_shared<RemoteDriver>(sock);
+    remote_.store(active_remote, std::memory_order_release);
     int fd = active_remote->open();
-    if (fd < 0)
-      return nullptr;
+    if (fd < 0) {
+      active_remote->close();
+      remote_.store(nullptr, std::memory_order_release);
+      return {};
+    }
     remote_kfd_fd_.store(fd, std::memory_order_release);
     // The primary remote KFD fd holds the first open reference.
     remote_open_refs_.store(1, std::memory_order_release);
@@ -357,12 +396,14 @@ public:
   /// instead of being misrouted to a dead RPC connection.
   void teardown_remote() {
     std::lock_guard lock(remote_mutex_);
-    RemoteDriver *active_remote = remote_.load(std::memory_order_acquire);
+    teardown_remote_locked();
+  }
+
+  void teardown_remote_locked() {
+    auto active_remote = remote_.exchange(nullptr, std::memory_order_acq_rel);
     if (!active_remote)
       return;
     active_remote->close();
-    remote_.store(nullptr, std::memory_order_release);
-    delete active_remote;
     int fd = remote_kfd_fd_.exchange(-1, std::memory_order_acq_rel);
     if (fd >= 0)
       InterposerContext::real.close(fd);
@@ -514,13 +555,12 @@ public:
 private:
   rj_vm_t *rj_vm_ = nullptr;
   /// @brief Active daemon-mode remote driver, or nullptr in local mode.
-  /// @details Stored atomically so lock-free readers (`remote()`,
-  /// `remote_lookup()`, `initialized()`, the AMDKFD ioctl fallback, the mmap
-  /// path) never race the writer that swaps it under `remote_mutex_` in
-  /// `get_or_create_remote()`/`teardown_remote()`. The mutex still serializes the
-  /// compound new+open and delete+clear sequences; the atomic only makes the
-  /// bare pointer read/write data-race-free.
-  std::atomic<RemoteDriver *> remote_{nullptr};
+  /// @details Atomic shared ownership lets lock-free interposed calls retain
+  /// the RemoteDriver while the final KFD close removes it from the context.
+  /// The remote mutex serializes connection creation, open-reference changes,
+  /// and teardown; the shared_ptr prevents teardown from freeing an object
+  /// still used by a concurrent ROCr thread.
+  std::atomic<std::shared_ptr<RemoteDriver>> remote_{nullptr};
   std::atomic<int> remote_kfd_fd_{-1};
   /// @brief Open-reference count for the remote (daemon-mode) KFD connection.
   /// @details The primary remote fd and every dup of it each hold one
@@ -947,10 +987,12 @@ int ioctl(int fd, unsigned long request, ...) {
     return -1;
   }
 
-  if (auto *remote = InterposerContext::ctx.remote_lookup(fd))
+  if (auto remote = InterposerContext::ctx.remote_lookup(fd))
     return remote->ioctl(request, arg);
   if (InterposerContext::ctx.is_kfd_dup(fd)) {
-    if (auto *remote = InterposerContext::ctx.remote_lookup(InterposerContext::ctx.remote_kfd_fd()))
+    if (auto remote =
+            InterposerContext::ctx.remote_lookup(
+                InterposerContext::ctx.remote_kfd_fd()))
       return remote->ioctl(request, arg);
   }
   // Late-ioctl safety net: an AMDKFD ('K') ioctl may arrive on a tracked KFD fd
@@ -959,7 +1001,7 @@ int ioctl(int fd, unsigned long request, ...) {
   // track as KFD (primary or dup), so an arbitrary unrelated fd carrying a
   // type-'K' ioctl is never misrouted to the remote KFD driver.
   if (_IOC_TYPE(request) == AMDKFD_IOCTL_BASE && InterposerContext::ctx.is_kfd_tracked(fd)) {
-    if (auto *remote = InterposerContext::ctx.remote())
+    if (auto remote = InterposerContext::ctx.remote())
       return remote->ioctl(request, arg);
   }
 
@@ -1152,14 +1194,16 @@ int fcntl64(int fd, int cmd, ...) {
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
   assert(InterposerContext::real.ready());
-  if (auto *remote = InterposerContext::ctx.remote_lookup(fd))
+  if (auto remote = InterposerContext::ctx.remote_lookup(fd))
     return remote->mmap(addr, length, prot, flags, offset);
 
   if (auto *drv = InterposerContext::ctx.lookup(fd))
     return drv->mmap(addr, length, prot, flags, offset);
 
   if (InterposerContext::ctx.is_drm(fd)) {
-    if (auto *remote = InterposerContext::ctx.remote_lookup(InterposerContext::ctx.remote_kfd_fd()))
+    if (auto remote =
+            InterposerContext::ctx.remote_lookup(
+                InterposerContext::ctx.remote_kfd_fd()))
       return remote->mmap(addr, length, prot, flags, offset);
     if (auto *drv = InterposerContext::ctx.driver())
       return drv->mmap(addr, length, prot, flags, offset);
@@ -1168,11 +1212,10 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
   if (fd < 0 && (flags & MAP_FIXED) && prot != PROT_NONE && addr) {
     int memfd_out = -1;
     off_t memfd_offset = 0;
-    if (InterposerContext::ctx.remote() && InterposerContext::ctx.remote()->find_memfd_for_addr(
-                                               addr, length, &memfd_out, &memfd_offset)) {
-      auto total = static_cast<off_t>(length) + memfd_offset;
-      [[maybe_unused]] auto ft_rc = ftruncate(memfd_out, total);
-      fallocate(memfd_out, 0, memfd_offset, static_cast<off_t>(length));
+    auto remote = InterposerContext::ctx.remote();
+    if (remote &&
+        remote->find_memfd_for_addr(
+            addr, length, &memfd_out, &memfd_offset)) {
       auto *raw = InterposerContext::real.mmap(
           addr, length, prot, (flags & ~MAP_ANONYMOUS) | MAP_SHARED, memfd_out, memfd_offset);
       if (raw != MAP_FAILED) {
@@ -1206,7 +1249,9 @@ int madvise(void *addr, size_t length, int advice) {
 
 int munmap(void *addr, size_t length) {
   assert(InterposerContext::real.ready());
-  if (auto *remote = InterposerContext::ctx.remote_lookup(InterposerContext::ctx.remote_kfd_fd())) {
+  if (auto remote =
+          InterposerContext::ctx.remote_lookup(
+              InterposerContext::ctx.remote_kfd_fd())) {
     int ret = remote->munmap(addr, length);
     if (ret != -ENOENT)
       return ret;
@@ -1370,8 +1415,9 @@ static const Sysfs::GpuInfo *interposer_gpu_info() {
   auto *drv = InterposerContext::ctx.driver();
   if (drv)
     return &drv->topology().gpu_info();
-  if (auto *remote = InterposerContext::ctx.remote_lookup(InterposerContext::ctx.remote_kfd_fd()))
-    return remote->gpu_info();
+  static thread_local Sysfs::GpuInfo remote_info;
+  if (InterposerContext::ctx.copy_remote_gpu_info(remote_info))
+    return &remote_info;
   return nullptr;
 }
 

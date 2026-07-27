@@ -5,13 +5,10 @@
 #define ROCJITSU_KMD_LINUX_SIMULATED_DRIVER_H_
 
 #include "rocjitsu/base/rj_compiler.h"
-#include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/device/device_backend.h"
 #include "rocjitsu/kmd/linux/kfd_process.h"
 #include "rocjitsu/kmd/linux/sysfs.h"
 #include "rocjitsu/vm/driver.h"
-#include "rocjitsu/vm/soc.h"
-
-#include "simdojo/sim/simulation.h"
 
 RJ_DIAGNOSTIC_PUSH
 RJ_DIAGNOSTIC_IGNORE_PEDANTIC
@@ -23,6 +20,7 @@ RJ_DIAGNOSTIC_POP
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace rocjitsu {
 
@@ -80,8 +78,8 @@ class SimulatedDriver : public Driver {
 public:
   [[nodiscard]] bool daemon_mode() const { return daemon_mode_; }
 
-  SimulatedDriver(SoC &soc, bool daemon_mode = false);
-  SimulatedDriver(std::vector<SoC *> socs, std::vector<uint32_t> gpu_ids, bool daemon_mode = false);
+  explicit SimulatedDriver(std::vector<std::shared_ptr<kmd::DeviceBackend>> backends,
+                           bool daemon_mode = false);
   ~SimulatedDriver() override;
 
   /// @brief Local-mode interface (interposer). Operates on the local process.
@@ -115,14 +113,26 @@ public:
   int munmap(uint32_t process_id, void *addr, size_t length);
   int close(uint32_t process_id);
   [[nodiscard]] int get_mmap_memfd(uint32_t process_id, off_t offset) const;
+  struct BackingDescriptor {
+    int fd = -1;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+  };
+  [[nodiscard]] bool get_mmap_backing(uint32_t process_id, off_t offset,
+                                      BackingDescriptor &backing) const;
+  [[nodiscard]] bool get_svm_backing(uint32_t process_id,
+                                     uint64_t start_addr,
+                                     BackingDescriptor &backing) const;
   /// @}
 
   /// @brief Local-mode get_mmap_memfd (uses local process).
   [[nodiscard]] int get_mmap_memfd(off_t offset) const;
 
   void setup_topology(const Sysfs::GpuInfo &gpu);
-  void setup_topology(const config::KfdDeviceConfig &dev, uint32_t num_xcc);
-  void setup_topology(const std::vector<config::KfdDeviceConfig> &devs, uint32_t num_xcc);
+  void setup_topology(const std::vector<Sysfs::GpuInfo> &gpus);
+  void set_runtime_root(std::string runtime_root) {
+    topology_.set_runtime_root(std::move(runtime_root));
+  }
   bool is_doorbell_range(const void *addr, size_t length) const;
   uint32_t gpu_id() const { return gpus_.empty() ? 0 : gpus_[0].gpu_id; }
   uint32_t num_gpus() const { return static_cast<uint32_t>(gpus_.size()); }
@@ -143,9 +153,9 @@ public:
 
   /// @brief Per-GPU device state (mirrors kfd_dev in the kernel).
   struct GpuDevice {
-    SoC *soc = nullptr;
+    std::shared_ptr<kmd::DeviceBackend> backend;
     uint32_t gpu_id = 0;
-    bool cps_initialized = false;
+    bool backend_initialized = false;
     kfd_process_device_apertures apertures{};
   };
 
@@ -165,15 +175,21 @@ private:
     return 0;
   }
 
-  void map_to_gpu(KfdProcess &proc, uint64_t gpu_va, void *host_ptr, size_t size,
-                  amdgpu::Mtype mtype = amdgpu::Mtype::RW);
-  void unmap_from_gpu(KfdProcess &proc, uint64_t gpu_va, size_t size);
+  int map_to_gpu(KfdProcess &proc, uint64_t gpu_va, void *host_ptr, size_t size,
+                 amdgpu::Mtype mtype = amdgpu::Mtype::RW,
+                 kmd::AllocationId allocation_id = 0,
+                 uint64_t device_paddr = 0);
+  int unmap_from_gpu(KfdProcess &proc, uint64_t gpu_va, size_t size);
 
   int dispatch_ioctl(KfdProcess &proc, unsigned long request, void *arg);
   void *dispatch_mmap(KfdProcess &proc, void *addr, size_t length, int prot, int flags,
                       off_t offset);
   int dispatch_munmap(KfdProcess &proc, void *addr, size_t length);
   int dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const;
+  bool dispatch_get_mmap_backing(KfdProcess &proc, off_t offset,
+                                 BackingDescriptor &backing) const;
+  bool dispatch_get_svm_backing(KfdProcess &proc, uint64_t start_addr,
+                                BackingDescriptor &backing) const;
 
   int get_version_ioctl(void *arg);
   int get_clock_counters_ioctl(void *arg);

@@ -10,24 +10,42 @@
 #include <sstream>
 #include <string>
 #include <unistd.h>
+#include <utility>
 
 namespace rocjitsu {
 
 namespace fs = std::filesystem;
 
+Sysfs::Sysfs(std::string runtime_root)
+    : runtime_root_(std::move(runtime_root)) {}
+
 Sysfs::~Sysfs() { cleanup(); }
 
-Sysfs::Sysfs(Sysfs &&other) noexcept : topology_dir_(std::move(other.topology_dir_)) {
+Sysfs::Sysfs(Sysfs &&other) noexcept
+    : topology_dir_(std::move(other.topology_dir_)),
+      drm_dir_(std::move(other.drm_dir_)),
+      runtime_root_(std::move(other.runtime_root_)),
+      gpu_info_(std::move(other.gpu_info_)) {
   other.topology_dir_.clear();
+  other.drm_dir_.clear();
 }
 
 Sysfs &Sysfs::operator=(Sysfs &&other) noexcept {
   if (this != &other) {
     cleanup();
     topology_dir_ = std::move(other.topology_dir_);
+    drm_dir_ = std::move(other.drm_dir_);
+    runtime_root_ = std::move(other.runtime_root_);
+    gpu_info_ = std::move(other.gpu_info_);
     other.topology_dir_.clear();
+    other.drm_dir_.clear();
   }
   return *this;
+}
+
+void Sysfs::set_runtime_root(std::string runtime_root) {
+  cleanup();
+  runtime_root_ = std::move(runtime_root);
 }
 
 void Sysfs::write_file(const std::string &path, const std::string &content) {
@@ -323,11 +341,17 @@ void Sysfs::write_gpu_node(const std::string &nodes_dir, uint32_t node_idx, cons
 }
 
 void Sysfs::write_drm_tree(const std::vector<GpuInfo> &gpus) {
-  char tmpl[] = "/tmp/rocjitsu_drm_XXXXXX";
-  char *dir = mkdtemp(tmpl);
-  if (!dir)
-    return;
-  drm_dir_ = dir;
+  if (runtime_root_.empty()) {
+    char tmpl[] = "/tmp/rocjitsu_drm_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir)
+      return;
+    drm_dir_ = dir;
+  } else {
+    drm_dir_ = (fs::path(runtime_root_) / "drm").string();
+    fs::remove_all(drm_dir_);
+    make_dir(drm_dir_);
+  }
 
   for (size_t i = 0; i < gpus.size(); ++i) {
     auto &gpu = gpus[i];
@@ -383,12 +407,23 @@ std::string Sysfs::generate(const GpuInfo &gpu) { return generate(std::vector<Gp
 std::string Sysfs::generate(const std::vector<GpuInfo> &gpus) {
   cleanup();
 
-  char tmpl[] = "/tmp/rocjitsu_topology_XXXXXX";
-  char *dir = mkdtemp(tmpl);
-  if (!dir)
-    return {};
-
-  topology_dir_ = dir;
+  if (runtime_root_.empty()) {
+    char tmpl[] = "/tmp/rocjitsu_topology_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir)
+      return {};
+    topology_dir_ = dir;
+  } else {
+    std::error_code error;
+    fs::create_directories(runtime_root_, error);
+    if (error)
+      return {};
+    topology_dir_ = (fs::path(runtime_root_) / "topology").string();
+    fs::remove_all(topology_dir_, error);
+    if (error)
+      return {};
+    make_dir(topology_dir_);
+  }
   if (!gpus.empty())
     gpu_info_ = gpus[0];
 

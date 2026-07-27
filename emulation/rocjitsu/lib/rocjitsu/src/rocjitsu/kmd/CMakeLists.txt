@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_subdirectory(device)
     add_subdirectory(linux)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_subdirectory(windows)

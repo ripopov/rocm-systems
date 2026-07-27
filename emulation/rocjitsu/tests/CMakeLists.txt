@@ -23,6 +23,7 @@ set(RJ_OBJECT_LIBS
     rocjitsu_isa_gfx1250
     rocjitsu_isa_risc_v
     simdojo
+    rocjitsu_kmd_device
     rocjitsu_kmd
     rocjitsu_vm
     rocjitsu_vm_amdgpu
@@ -293,6 +294,7 @@ add_executable(
     dbt/translate_test.cpp
     mtype_flags_test.cpp
     kfd_ioctl_test.cpp
+    kmd_server_test.cpp
     waitcnt_counter_test.cpp
     instruction_execution_harness_test.cpp
     decode_execute_benchmark.cpp
@@ -374,11 +376,53 @@ target_link_libraries(
         Threads::Threads
         GTest::gtest_main
 )
+if(TARGET rocjitsu_kmd_server)
+    target_link_libraries(rocjitsu_tests PRIVATE rocjitsu_kmd_server)
+endif()
 rj_configure_target(rocjitsu_tests TEST)
 # Benchmarks are timing tools, not correctness tests; keep them out of the
 # default ctest run (invoke them directly via
 # ./rocjitsu_tests --gtest_filter='*Benchmark*').
 rj_add_gtest_tests(rocjitsu_tests TEST_FILTER -*Benchmark*)
+
+if(TARGET rocjitsu_kmd_server)
+    add_executable(kmd_c_abi_test kmd_c_abi_test.c)
+    set_target_properties(
+        kmd_c_abi_test
+        PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED ON C_EXTENSIONS ON
+    )
+    target_link_libraries(kmd_c_abi_test PRIVATE rocjitsu_kmd_server)
+    rj_add_test(NAME KmdServer.CAbi COMMAND kmd_c_abi_test)
+
+    add_executable(
+        kmd_cpp17_consumer_test
+        kmd_cpp17_consumer_test.cpp
+    )
+    set_target_properties(
+        kmd_cpp17_consumer_test
+        PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+            CXX_EXTENSIONS OFF
+    )
+    target_link_libraries(
+        kmd_cpp17_consumer_test
+        PRIVATE rocjitsu_kmd_server
+    )
+    rj_add_test(
+        NAME KmdServer.Cpp17Consumer
+        COMMAND kmd_cpp17_consumer_test
+    )
+    rj_add_test(
+        NAME KmdServer.ExportedSymbols
+        COMMAND
+            ${CMAKE_COMMAND}
+            "-DLIBRARY=$<TARGET_FILE:rocjitsu_kmd_server>"
+            "-DNM=${CMAKE_NM}"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/check_kmd_server_exports.cmake"
+    )
+endif()
 
 add_executable(
     rj_dbt_translate_smoke_test

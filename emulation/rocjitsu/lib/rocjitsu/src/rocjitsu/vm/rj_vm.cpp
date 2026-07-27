@@ -6,6 +6,7 @@
 #include "embedded_schema.h"
 #include "rocjitsu/config/checkpoint.h"
 #include "rocjitsu/kmd/linux/simulated_driver.h"
+#include "rocjitsu/kmd/linux/device_info.h"
 #include "rocjitsu/vm/rj_vm_impl.h"
 #include "rocjitsu/vm/soc.h"
 
@@ -86,9 +87,11 @@ rj_status_t create_from_loaded(config::LoadedConfig &loaded, rj_vm_mode_t mode, 
   if (serve) {
     s->engine->register_as_primary();
     if (loaded.num_gpus > 1 && !loaded.devices.empty())
-      s->vm->driver()->setup_topology(loaded.devices, num_xcds);
+      s->vm->driver()->setup_topology(
+          kmd::deviceInfoFromConfig(loaded.devices, num_xcds));
     else
-      s->vm->driver()->setup_topology(loaded.device, num_xcds);
+      s->vm->driver()->setup_topology(
+          kmd::deviceInfoFromConfig(loaded.device, num_xcds));
     s->vm->driver()->open();
   }
 
