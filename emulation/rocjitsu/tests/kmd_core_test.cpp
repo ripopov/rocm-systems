@@ -8,7 +8,10 @@
 #include "util/unique_handle.h"
 
 #include <cerrno>
+#include <csignal>
+#include <fcntl.h>
 #include <gtest/gtest.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -195,6 +198,72 @@ TEST(KmdCoreTest, SocketServesCommonKfdWithoutSimulator) {
   server.stop();
   EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_STOPPED);
   EXPECT_EQ(state->live_processes, 0);
+}
+
+void check_allocation_failure(int resource, int expected_errno) {
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::make_unique<TestDeviceBackend>()});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  if (!pid)
+    _exit(1);
+  const auto process = driver.find_process(pid);
+  const auto initial_va = process->next_gpu_va_;
+  const auto initial_handle = process->next_handle_;
+  auto fd_count = [] {
+    unsigned count = 0;
+    for (int fd = 0; fd < 8192; ++fd)
+      if (fcntl(fd, F_GETFD) >= 0)
+        ++count;
+    return count;
+  };
+  const auto initial_fds = fd_count();
+  if (resource == RLIMIT_FSIZE)
+    std::signal(SIGXFSZ, SIG_IGN);
+  rlimit limit{};
+  if (setrlimit(resource, &limit) != 0)
+    _exit(2);
+  kfd_ioctl_alloc_memory_of_gpu_args args{};
+  args.gpu_id = 7;
+  args.size = 4096;
+  args.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  args.handle = 0xdeadbeef;
+  const int result = driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args);
+  const bool clean = result == -expected_errno && process->allocations_.empty() &&
+                     process->next_gpu_va_ == initial_va &&
+                     process->next_handle_ == initial_handle && args.handle == 0xdeadbeef &&
+                     fd_count() == initial_fds;
+  _exit(clean ? 0 : 3);
+}
+
+TEST(KmdCoreTest, AllocationFdExhaustionDoesNotPublishState) {
+  EXPECT_EXIT(check_allocation_failure(RLIMIT_NOFILE, EMFILE), testing::ExitedWithCode(0), "");
+}
+
+TEST(KmdCoreTest, AllocationSizingFailureClosesBacking) {
+  EXPECT_EXIT(check_allocation_failure(RLIMIT_FSIZE, EFBIG), testing::ExitedWithCode(0), "");
+}
+
+TEST(KmdCoreTest, AllocationMappingFailureClosesBacking) {
+  EXPECT_EXIT(check_allocation_failure(RLIMIT_AS, ENOMEM), testing::ExitedWithCode(0), "");
+}
+
+TEST(KmdCoreTest, AllocationRejectsZeroAndOverflowSizes) {
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::make_unique<TestDeviceBackend>()});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  ASSERT_NE(pid, 0);
+  kfd_ioctl_alloc_memory_of_gpu_args args{};
+  args.gpu_id = 7;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args), -EINVAL);
+  args.size = UINT64_MAX;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args), -EINVAL);
+  args.size = 4096;
+  args.va_addr = UINT64_MAX - 2048;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args), -EINVAL);
+  EXPECT_TRUE(driver.find_process(pid)->allocations_.empty());
+  EXPECT_EQ(driver.close(pid), 0);
 }
 
 } // namespace
