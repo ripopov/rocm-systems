@@ -129,6 +129,8 @@ TEST_F(KmdRpcServerTest, StopDrainsBlockedDeviceOperation) {
     ASSERT_TRUE(
         device.changed.wait_for(lock, std::chrono::seconds(5), [&] { return device.entered; }));
   }
+  server.stop_accepting();
+  EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_RUNNING);
   server.stop();
   EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_STOPPED);
   EXPECT_EQ(device.closes.load(), 1u);
@@ -147,6 +149,53 @@ TEST_F(KmdRpcServerTest, CompetingServerCannotRemoveLiveSocket) {
   auto client = connect_client();
   ASSERT_GE(client.get(), 0);
   handshake(client.get());
+}
+
+TEST_F(KmdRpcServerTest, StopAcceptingPreservesEstablishedSessions) {
+  ASSERT_EQ(server.bind(path.c_str()), ROCJITSU_STATUS_SUCCESS);
+  ASSERT_EQ(server.start(), ROCJITSU_STATUS_SUCCESS);
+  auto first = connect_client();
+  auto second = connect_client();
+  ASSERT_GE(first.get(), 0);
+  ASSERT_GE(second.get(), 0);
+  handshake(first.get());
+  handshake(second.get());
+
+  server.stop_accepting();
+  server.stop_accepting();
+  EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_RUNNING);
+  EXPECT_LT(connect_client().get(), 0);
+  EXPECT_EQ(device.opens.load(), 2u);
+  EXPECT_EQ(device.closes.load(), 0u);
+  {
+    std::lock_guard lock(device.mutex);
+    EXPECT_FALSE(device.closing);
+  }
+  // Each pre-existing session must still execute requests and reply normally.
+  for (int fd : {first.get(), second.get()}) {
+    RpcHeader request{};
+    request.opcode = RPC_CLOSE;
+    request.request_id = 17;
+    ASSERT_TRUE(rpc_send_exact(fd, &request, sizeof(request)));
+    RpcHeader response{};
+    ASSERT_TRUE(rpc_recv_exact(fd, &response, sizeof(response)));
+    EXPECT_EQ(response.opcode, RPC_CLOSE);
+    EXPECT_EQ(response.request_id, 17u);
+    EXPECT_EQ(response.result, 0);
+  }
+  EXPECT_EQ(device.closes.load(), 2u);
+  server.stop();
+  EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_STOPPED);
+  EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST_F(KmdRpcServerTest, QuiescedListenerCannotBeStarted) {
+  ASSERT_EQ(server.bind(path.c_str()), ROCJITSU_STATUS_SUCCESS);
+  server.stop_accepting();
+  EXPECT_EQ(server.start(), ROCJITSU_STATUS_INVALID_ARGUMENT);
+  EXPECT_LT(connect_client().get(), 0);
+  server.stop();
+  EXPECT_FALSE(std::filesystem::exists(path));
 }
 
 } // namespace
