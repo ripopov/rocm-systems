@@ -26,6 +26,7 @@ public:
   }
 
   int failure() const { return failure_.load(std::memory_order_acquire); }
+  void fail(int status) noexcept { latch(status); }
 
   int allocate(const DeviceAllocationRequest &source,
                std::shared_ptr<DeviceAllocation> &allocation) override {

@@ -216,6 +216,14 @@ typedef struct rj_kmd_write64 {
   uint64_t value;
 } rj_kmd_write64_t;
 
+typedef struct rj_kmd_read64 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t process_id;
+  uint32_t reserved;
+  uint64_t gpu_va;
+} rj_kmd_read64_t;
+
 typedef int32_t (*rj_kmd_process_fn)(void *context, const rj_kmd_process_request_t *request);
 typedef int32_t (*rj_kmd_allocate_fn)(void *context, const rj_kmd_allocation_request_t *request,
                                       rj_kmd_backing_slice_t *slice);
@@ -227,6 +235,10 @@ typedef int32_t (*rj_kmd_queue_fn)(void *context, const rj_kmd_queue_t *queue);
 typedef int32_t (*rj_kmd_queue_update_fn)(void *context, const rj_kmd_queue_update_t *queue);
 typedef int32_t (*rj_kmd_queue_key_fn)(void *context, const rj_kmd_queue_key_t *queue);
 typedef int32_t (*rj_kmd_write64_fn)(void *context, const rj_kmd_write64_t *write);
+typedef int32_t (*rj_kmd_read64_fn)(void *context, const rj_kmd_read64_t *read, uint64_t *value);
+/// Must quiesce all device accesses before returning. Called once on final
+/// teardown or earlier on a terminal cleanup failure. Subsequent free calls
+/// for already reclaimed allocations must succeed without double release.
 typedef void (*rj_kmd_shutdown_fn)(void *context);
 
 typedef struct rj_kmd_backend_ops {
@@ -245,6 +257,7 @@ typedef struct rj_kmd_backend_ops {
   rj_kmd_queue_update_fn update_queue;
   rj_kmd_queue_key_fn destroy_queue;
   rj_kmd_write64_fn write64;
+  rj_kmd_read64_fn read64;
   rj_kmd_shutdown_fn shutdown;
 } rj_kmd_backend_ops_t;
 
