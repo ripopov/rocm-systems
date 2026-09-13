@@ -33,12 +33,30 @@ struct DeviceCallbacks {
 
 /// Optional device execution support for KFD debugger sessions. Session
 /// authorization and event bookkeeping remain in the common KFD implementation.
+struct DebugQueueContext {
+  uint32_t process_id;
+  uint32_t queue_id;
+  uint64_t base;
+  uint32_t size;
+  int32_t client_pid;
+  /// Authorized target-memory FD borrowed only for the duration of the call.
+  int target_mem_fd;
+};
+
 class DeviceDebugger {
 public:
   virtual ~DeviceDebugger() = default;
   virtual void set_active(bool active) = 0;
   virtual void release_queue(uint32_t process, uint32_t queue) = 0;
   virtual bool signal_queue_exception(uint32_t process, uint32_t queue, uint64_t mask) = 0;
+  /// Publish stopped waves and return the oldest packet, or fail without
+  /// claiming a debugger-visible stop. The caller owns queue bookkeeping.
+  virtual std::optional<uint64_t> save_queue(const DebugQueueContext &context) = 0;
+  virtual bool restore_queue(const DebugQueueContext &context) = 0;
+  /// Stop execution, publish outside device locks, and undo a failed stop.
+  virtual bool suspend_queue(uint32_t process, uint32_t queue,
+                             const std::function<bool()> &publish) = 0;
+  virtual void clear_completed_queue(const DebugQueueContext &context) = 0;
 };
 
 /// @brief A queue programmed by KFD, independent of the execution engine.

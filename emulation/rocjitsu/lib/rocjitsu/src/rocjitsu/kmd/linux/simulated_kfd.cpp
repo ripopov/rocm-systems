@@ -2896,142 +2896,6 @@ std::shared_ptr<KfdProcess> SimulatedKfd::find_process_by_client_pid(pid_t pid) 
   return nullptr;
 }
 
-namespace {
-
-uint32_t gfx1250_status(uint32_t status) {
-  // SCC, priorities and HALT moved to STATE_PRIV. The remaining fields used by
-  // dbgapi retain their gfx9 positions.
-  return status & ~((0x1Fu << 0) | (1u << 7) | (1u << 13) | (1u << 19));
-}
-
-uint32_t internal_status_from_gfx1250(const kmd::CwsrWaveState &state) {
-  uint32_t status = amdgpu::update_status_from_gfx12_state_priv(state.status, state.state_priv);
-  status &= ~amdgpu::Wavefront::kStatusHaltMask;
-  if (state.saved_status_halt)
-    status |= amdgpu::Wavefront::kStatusHaltMask;
-  return status;
-}
-
-uint32_t internal_trapsts_from_gfx1250(const kmd::CwsrWaveState &state) {
-  uint32_t trapsts = amdgpu::update_trapsts_from_gfx12_excp_flag_priv(0, state.excp_flag_priv);
-  return amdgpu::update_trapsts_from_gfx12_excp_flag_user(trapsts, state.excp_flag_user);
-}
-
-kmd::CwsrWaveState build_cwsr_wave_state(amdgpu::Wavefront &wf, rj_code_arch_t arch) {
-  kmd::CwsrWaveState state;
-  const bool gfx12_5 = kmd::cwsr_layout_kind(arch) == kmd::CwsrLayoutKind::Gfx12_5;
-  const uint32_t raw_status = wf.status_raw();
-  state.pc = wf.pc;
-  // A wave frozen inside the trap handler has the HANDLER's EXEC live, not the
-  // application's: the handler runs with its own mask and parks 0x80000000 (and
-  // then a doorbell id) in EXEC_LO around MSG_GET_DOORBELL. Publishing that
-  // makes the debugger report every lane active, which inverts `lane apply
-  // -active/-inactive` (gdb.rocm/lane-info.exp). trap_saved_exec_ holds the
-  // interrupted value for the whole handler, so un-shadow it here, as the
-  // STATUS field below does with trap_saved_status().
-  //
-  // in_trap_handler() is the predicate for both, and it opens at handler entry
-  // rather than at MSG_INTERRUPT because the doorbell park happens on the way
-  // there. It closes at s_rfe, which puts the interrupted values back, so from
-  // then on the live registers are the application's again.
-  //
-  // The record is not write-only -- apply_cwsr_to_wave() feeds it back on
-  // resume -- so un-shadowing here is only safe because that path shadows in
-  // the other direction under the same predicate: a debugger edit to EXEC is
-  // written to trap_saved_exec_, which the handler's s_rfe installs, instead of
-  // overwriting the mask a mid-flight handler is still running under.
-  state.exec = wf.in_trap_handler() ? wf.trap_saved_exec() : wf.exec();
-  state.vcc = wf.vcc();
-  state.flat_scratch = wf.scratch_base();
-  state.m0 = wf.m0();
-  state.mode = wf.mode_raw();
-  state.trapsts = wf.trapsts();
-  // Whether the application was already halted when it trapped outlives the
-  // handler: trap_saved_status_ still describes the interrupted wave after
-  // s_rfe, and trap_interrupt_sent() is the flag that says a handler produced
-  // this stop. in_trap_handler() has to be part of the predicate too, or the
-  // two halves of the published STATUS come from different registers between
-  // trap entry and MSG_INTERRUPT -- the body from trap_saved_status_ and the
-  // HALT bit from the handler's live one. apply_cwsr_to_wave() recombines them
-  // into a word that never existed on the wave, so an identity round-trip in
-  // that window rewrites the application's saved HALT with the handler's.
-  const bool handler_context = wf.in_trap_handler() || wf.trap_interrupt_sent();
-  state.saved_status_halt = ((handler_context ? wf.trap_saved_status() : raw_status) >> 13) & 1u;
-  state.wave_stopped = wf.debug_halted();
-  // The published STATUS shadows on the narrower predicate, the same one EXEC
-  // uses: only while the handler is actually running is the live register the
-  // handler's rather than the application's. Once s_rfe has run, the live value
-  // is the application's again and is what the debugger should see.
-  const uint32_t application_status = wf.in_trap_handler() ? wf.trap_saved_status() : raw_status;
-  state.status =
-      state.wave_stopped ? application_status | (1u << 13) : application_status & ~(1u << 13);
-  if (gfx12_5) {
-    uint32_t debug_status = application_status;
-    if (state.wave_stopped)
-      debug_status |= amdgpu::Wavefront::kStatusHaltMask;
-    else
-      debug_status &= ~amdgpu::Wavefront::kStatusHaltMask;
-    state.state_priv = amdgpu::gfx12_state_priv_from_status(debug_status, state.flat_scratch != 0);
-    state.status = gfx1250_status(application_status);
-    state.excp_flag_priv = amdgpu::gfx12_excp_flag_priv_from_trapsts(state.trapsts);
-    state.excp_flag_user = (state.trapsts & 0x7Fu) | wf.gfx12_excp_flag_user_extra_raw();
-    state.trap_ctrl = wf.gfx12_trap_ctrl_raw();
-    state.xnack_state_priv = wf.gfx1250_xnack_state_priv_raw();
-    state.xnack_mask = wf.gfx1250_xnack_mask_raw();
-  }
-  state.trap_id = wf.trap_id();
-  state.wave_id = wf.debug_wave_id();
-  state.group_ids = wf.wg_coord();
-  state.wave_in_group = wf.wave_in_group();
-  state.queue_packet_id = wf.aql_packet_id() & 0x1FFFFFFu;
-  state.scratch_scoreboard_id = wf.scratch_scoreboard_id();
-  state.shader_engine_id = wf.shader_engine_id();
-  state.spi_ttmps_setup = true;
-  state.num_sgprs = wf.num_sgprs();
-  state.num_vgprs = wf.num_vgprs();
-
-  state.sgprs.resize(state.num_sgprs);
-  for (uint32_t s = 0; s < state.num_sgprs; ++s)
-    state.sgprs[s] = wf.debug_read_sgpr(s);
-  // The CWSR record's VGPR stride is wave64-shaped (cwsr.cpp kVgprLaneBytes)
-  // whatever the wave size is, but the physical register only has wf_size()
-  // lanes -- a wave32 VectorReg<32> is exactly 32 wide, so reading lanes 32-63
-  // runs off it into the neighbouring register. Read the live lanes and leave
-  // the rest of the wave64-shaped slot at the zero resize() already wrote; the
-  // restore path is bounded by wf_size() too and never looks at them.
-  state.vgprs.resize(static_cast<size_t>(state.num_vgprs) * 64);
-  const uint32_t live_lanes = wf.wf_size();
-  for (uint32_t r = 0; r < state.num_vgprs; ++r)
-    for (uint32_t lane = 0; lane < live_lanes; ++lane)
-      state.vgprs[static_cast<size_t>(r) * 64 + lane] = wf.debug_read_vgpr(r, lane);
-  state.lds.resize(wf.lds_size());
-  if (!state.lds.empty())
-    static_cast<const amdgpu::Lds &>(wf.lds()).read(wf.lds_base(), state.lds.data(),
-                                                    static_cast<uint32_t>(state.lds.size()));
-  return state;
-}
-
-void prepare_cwsr_wave_states(std::vector<kmd::CwsrWaveState> &waves) {
-  std::sort(waves.begin(), waves.end(), [](const auto &lhs, const auto &rhs) {
-    if (lhs.queue_packet_id != rhs.queue_packet_id)
-      return lhs.queue_packet_id < rhs.queue_packet_id;
-    if (lhs.group_ids != rhs.group_ids)
-      return lhs.group_ids < rhs.group_ids;
-    return lhs.wave_in_group < rhs.wave_in_group;
-  });
-  auto same_group = [](const auto &lhs, const auto &rhs) {
-    return lhs.queue_packet_id == rhs.queue_packet_id && lhs.group_ids == rhs.group_ids;
-  };
-  for (size_t index = 0; index < waves.size(); ++index) {
-    waves[index].is_first_in_group = index == 0 || !same_group(waves[index], waves[index - 1]);
-    waves[index].is_last_in_group =
-        index + 1 == waves.size() || !same_group(waves[index], waves[index + 1]);
-    if (!waves[index].is_first_in_group)
-      waves[index].lds.clear();
-  }
-}
-
-} // namespace
 
 void SimulatedKfd::raise_debug_event(const std::shared_ptr<KfdProcess> &proc, uint32_t queue_id,
                                      uint32_t gpu_id, uint64_t exception_mask) {
@@ -3056,92 +2920,17 @@ bool SimulatedKfd::serialize_queue_debug_waves(uint32_t process_id, uint32_t que
                                                uint32_t gpu_id, uint64_t ctx_base,
                                                uint32_t ctx_size) {
   auto *gpu = find_gpu(gpu_id);
-  if (!gpu || !gpu->soc || ctx_base == 0)
+  if (!gpu || !gpu->backend || !gpu->backend->debugger() || ctx_base == 0)
     return false;
 
-  // Never publish a record shaped for the wrong architecture. Handlers ask
-  // debug_stop_publishable() before claiming a stop, so reaching here on an
-  // unmodelled part means a caller skipped the gate; refuse rather than hand
-  // rocm-dbgapi an image it would decode against its own layout.
-  if (!kmd::cwsr_layout_modelled(gpu->soc->arch()))
-    return false;
-
-  const bool per_xcc_areas = gpu->soc->arch() == ROCJITSU_CODE_ARCH_CDNA5;
-  const uint32_t area_count = per_xcc_areas ? std::max(1u, gpu->soc->num_xcds()) : 1u;
-  std::vector<std::vector<kmd::CwsrWaveState>> waves_by_area(area_count);
-  auto collect = [&](amdgpu::CommandProcessor *cp, uint32_t area) {
-    for (auto *cu : cp->compute_units()) {
-      cu->with_wave_state_locked([&] {
-        for (uint32_t i = 0; i < cu->num_wf_slots(); ++i) {
-          auto *wave = cu->wf(i);
-          if (wave->debug_stopped() && wave->process_id() == process_id &&
-              wave->queue_id() == queue_id)
-            waves_by_area[area].push_back(build_cwsr_wave_state(*wave, gpu->soc->arch()));
-        }
-      });
-    }
-  };
-  if (per_xcc_areas) {
-    for (uint32_t xcc_id = 0; xcc_id < area_count; ++xcc_id)
-      collect(gpu->soc->xcd(xcc_id)->command_processor(), xcc_id);
-  } else {
-    gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) { collect(cp, 0); });
-  }
-  size_t wave_count = 0;
-  for (const auto &waves : waves_by_area)
-    wave_count += waves.size();
-  if (wave_count == 0)
-    return false;
-
-  auto *memory = gpu->soc->memory();
   auto proc = find_process(process_id);
   if (!proc)
     return false;
   UniqueDriverFd target_mem = duplicate_debug_target_mem(proc->client_pid());
-  bool publish_ok = true;
-  auto write_block = [&](uint64_t address, std::span<const uint8_t> bytes) {
-    if (target_mem.get() < 0) {
-      // A refused write publishes nothing, so reporting success would tell the
-      // debugger a context is available at an address that holds none of it.
-      // The pwrite path below fails publication on a short write for the same
-      // reason; this is that failure arriving through the memory model.
-      if (memory->write_block(address, bytes, process_id) == amdgpu::AccessOutcome::Faulted) {
-        publish_ok = false;
-        util::Logger::warn("CWSR target write faulted: addr=0x", std::hex, address, std::dec,
-                           " pid=", proc->client_pid());
-      }
-      return;
-    }
-    const ssize_t written =
-        pwrite(target_mem.get(), bytes.data(), bytes.size(), static_cast<off_t>(address));
-    if (written != static_cast<ssize_t>(bytes.size())) {
-      publish_ok = false;
-      util::Logger::warn("CWSR target write failed: addr=0x", std::hex, address, " pid=", std::dec,
-                         proc->client_pid(), " rc=", written, " errno=", errno);
-    }
-  };
-  bool layouts_ok = true;
-  constexpr size_t kCwsrHeaderBytes = 10 * sizeof(uint32_t);
-  const std::array<uint8_t, kCwsrHeaderBytes> empty_header{};
-  for (uint32_t area = 0; area < area_count; ++area) {
-    const uint64_t area_base = ctx_base + static_cast<uint64_t>(area) * ctx_size;
-    auto &waves = waves_by_area[area];
-    if (waves.empty()) {
-      write_block(area_base, empty_header);
-      continue;
-    }
-    prepare_cwsr_wave_states(waves);
-    layouts_ok &=
-        kmd::serialize_queue_cwsr_bulk(area_base, ctx_size, waves, write_block, gpu->soc->arch())
-            .ok;
-  }
-  if (!layouts_ok || !publish_ok)
+  const auto oldest_packet = gpu->backend->debugger()->save_queue(
+      {process_id, queue_id, ctx_base, ctx_size, proc->client_pid(), target_mem.get()});
+  if (!oldest_packet)
     return false;
-
-  uint64_t oldest_packet = UINT64_MAX;
-  for (const auto &waves : waves_by_area)
-    for (const auto &wave : waves)
-      oldest_packet = std::min<uint64_t>(oldest_packet, wave.queue_packet_id);
   uint64_t read_pointer = 0;
   uint64_t write_pointer = 0;
   {
@@ -3153,8 +2942,8 @@ bool SimulatedKfd::serialize_queue_debug_waves(uint32_t process_id, uint32_t que
     write_pointer = queue->second.write_pointer_address;
   }
   if (read_pointer != 0 && write_pointer != 0 &&
-      oldest_packet < memory->read64(write_pointer, process_id))
-    memory->write64(read_pointer, oldest_packet, process_id);
+      *oldest_packet < gpu->backend->read64(process_id, write_pointer))
+    gpu->backend->write64(process_id, read_pointer, *oldest_packet);
   return true;
 }
 
@@ -3262,7 +3051,7 @@ bool SimulatedKfd::on_wave_sendmsg(amdgpu::Wavefront &wave, uint32_t message) {
 
 bool SimulatedKfd::debug_stop_publishable(uint32_t gpu_id) {
   auto *gpu = find_gpu(gpu_id);
-  if (gpu == nullptr || gpu->soc == nullptr)
+  if (gpu == nullptr || !gpu->backend || !gpu->backend->debugger())
     return false;
   // The codec reproduces the gfx9.4 CWSR layout only (kmd/linux/cwsr.h), and
   // the differences elsewhere are not confined to one field -- the control
@@ -3276,13 +3065,13 @@ bool SimulatedKfd::debug_stop_publishable(uint32_t gpu_id) {
   // fatal_error, so refusing there aborts the debugger instead of declining.
   // Declining cleanly is the topology's job (HSA_CAP_TRAP_DEBUG_SUPPORT), and
   // that surface is deliberately kept identical to the real KFD driver.
-  if (kmd::cwsr_layout_modelled(gpu->soc->arch()))
+  if (kmd::cwsr_layout_modelled(gpu->backend->architecture()))
     return true;
   if (!gpu->cwsr_layout_warned) {
     gpu->cwsr_layout_warned = true;
     util::Logger::warn(
         "wave stops not published on gpu_id=", gpu_id,
-        ": no CWSR record layout is modelled for arch=", static_cast<int>(gpu->soc->arch()),
+        ": no CWSR record layout is modelled for arch=", static_cast<int>(gpu->backend->architecture()),
         "; GPU debugging is supported on gfx942/gfx950/gfx1250 only");
   }
   return false;
@@ -3622,98 +3411,6 @@ UniqueDriverFd SimulatedKfd::duplicate_debug_target_mem(pid_t target_pid) const 
   return UniqueDriverFd(safe_fcntl(session->second.target_mem_fd.get(), F_DUPFD_CLOEXEC, 0));
 }
 
-void SimulatedKfd::apply_cwsr_to_wave(amdgpu::Wavefront &wave, const kmd::CwsrWaveState &state,
-                                      rj_code_arch_t arch) {
-  constexpr uint32_t kModeDebugEnMask = 1u << 11;
-  constexpr uint32_t kStatusHaltMask = amdgpu::Wavefront::kStatusHaltMask;
-  const bool gfx12_5 = kmd::cwsr_layout_kind(arch) == kmd::CwsrLayoutKind::Gfx12_5;
-  wave.pc = state.pc;
-  // Mirror of the un-shadowing in build_cwsr_wave_state(): while a handler is
-  // mid-flight the published EXEC is the interrupted application mask, so the
-  // value coming back belongs to the shadow, not to the live register the
-  // handler is executing under. s_rfe installs it when the handler returns.
-  if (wave.in_trap_handler())
-    wave.set_trap_saved_exec(state.exec);
-  else
-    wave.set_exec(state.exec);
-  wave.set_vcc_raw(state.vcc);
-  wave.set_m0(state.m0);
-  // STATUS shadows the same way EXEC does, and the cost of getting it wrong is
-  // higher: the ROCr handler raises STATUS.HALT and only then returns, so a
-  // record applied in that window used to clear the HALT the handler had just
-  // set. s_rfe then saw a running wave, resumed it, and the breakpoint was
-  // silently lost -- one inferior in gdb.rocm/multi-inferior-stress.exp running
-  // its kernel to completion and exiting without ever stopping. Route the
-  // record's HALT to the interrupted state the handler restores and leave the
-  // live register to the handler.
-  const uint32_t restored_status = gfx12_5 ? internal_status_from_gfx1250(state)
-                                           : (state.status & ~kStatusHaltMask) |
-                                                 (state.saved_status_halt ? kStatusHaltMask : 0u);
-  if (wave.in_trap_handler())
-    wave.set_trap_saved_status(restored_status);
-  else
-    wave.set_status_raw(restored_status);
-  // The live STATUS.HALT stays as it is for a handler that raised it with
-  // s_setreg: there the bit is the handler's own request to keep the wave
-  // stopped, and clearing it on a resume loses the breakpoint --
-  // DbgTrapCwsrShadowsTrapHandlerRegistersAndRoutesDebuggerEdits pins that.
-  // A wave halted at s_sendmsghalt sits in the same window and wants the
-  // opposite: it has already reported and is waiting to be let go, so leaving
-  // the bit set strands it at the handler return. The record cannot tell the
-  // two apart, which is why the wave records who raised the bit.
-  if (!state.wave_stopped && wave.self_halted()) {
-    wave.set_status_halt(false);
-    wave.set_self_halted(false);
-  }
-  wave.set_mode_raw(state.mode);
-  wave.set_trapsts(gfx12_5 ? internal_trapsts_from_gfx1250(state) : state.trapsts);
-  if (gfx12_5) {
-    wave.set_gfx12_excp_flag_user_extra_raw(state.excp_flag_user & (0x3u << 30));
-    wave.set_gfx12_trap_ctrl_raw(state.trap_ctrl);
-    wave.set_gfx1250_xnack_state_priv_raw(state.xnack_state_priv);
-    wave.set_gfx1250_xnack_mask_raw(state.xnack_mask);
-  }
-  wave.set_debug_wave_id(state.wave_id);
-  wave.set_aql_packet_id(state.queue_packet_id);
-  const uint32_t stack_pointer = wave.debug_read_sgpr(32);
-  const uint32_t stack_frame = wave.debug_read_sgpr(33);
-  // rocm-dbgapi may submit a lightweight control-state update with no register
-  // payload after displaced stepping. Preserve the SGPR/VGPR values produced
-  // by the displaced instruction in that case rather than restoring zeros.
-  //
-  // Skip exactly the slots the codec treats as aliases, not everything above
-  // the architected count: s104/s105 sit between the FLAT_SCRATCH and VCC
-  // aliases and are ordinary registers the debugger may edit. Sharing
-  // cwsr_sgpr_slot_is_aliased() with the codec is what keeps the two ends of
-  // the round trip from disagreeing about which slots carry register state.
-  if (!state.sgprs.empty())
-    for (uint32_t s = 0; s < state.num_sgprs && s < state.sgprs.size(); ++s)
-      if (s != 32 && s != 33 && !kmd::cwsr_sgpr_slot_is_aliased(s, arch))
-        wave.debug_write_sgpr(s, state.sgprs[s]);
-  if (!state.vgprs.empty())
-    for (uint32_t r = 0; r < state.num_vgprs; ++r)
-      for (uint32_t lane = 0; lane < wave.wf_size(); ++lane) {
-        const size_t index = static_cast<size_t>(r) * 64 + lane;
-        if (index < state.vgprs.size())
-          wave.debug_write_vgpr(r, lane, state.vgprs[index]);
-      }
-  // FLAT_SCRATCH travels in its own field because it aliases two SGPR slots the
-  // loop above skips. This used to save and re-install wave.scratch_base()
-  // around the loop, which the loop cannot reach anyway (scratch_base_ is a
-  // standalone member), so the only effect was discarding the debugger's edit.
-  wave.set_scratch_base(state.flat_scratch);
-  wave.debug_write_sgpr(32, stack_pointer);
-  wave.debug_write_sgpr(33, stack_frame);
-  const bool single_step = !state.wave_stopped && (gfx12_5 ? (state.trap_ctrl & (1u << 9)) != 0
-                                                           : (state.mode & kModeDebugEnMask) != 0);
-  wave.set_debug_single_step(single_step);
-  wave.set_debug_halted(state.wave_stopped);
-  // debug_suspended is deliberately left set here. Clearing it per wave made
-  // each wave runnable the moment its own record was applied, so the engine
-  // could execute it while its queue-mates -- and their LDS images -- were
-  // still being restored. resume_debug_queues() commits the bit for every wave
-  // in the queue in one pass once the whole restore has succeeded.
-}
 
 int SimulatedKfd::resume_debug_queues(KfdProcess *proc, uint32_t *queue_ids, uint32_t num_queues) {
   constexpr uint32_t kQueueError = uint32_t{1} << KFD_DBG_QUEUE_ERROR_BIT;
@@ -3748,159 +3445,14 @@ int SimulatedKfd::resume_debug_queues(KfdProcess *proc, uint32_t *queue_ids, uin
   uint32_t resumed = 0;
   for (const auto &context : queues) {
     auto *gpu = find_gpu(context.gpu_id);
-    if (!gpu || !gpu->soc) {
+    if (!gpu || !gpu->backend || !gpu->backend->debugger()) {
       queue_ids[context.request_index] |= kQueueError;
       continue;
     }
-    std::vector<amdgpu::Wavefront *> stopped;
-    std::vector<kmd::CwsrWaveState> states;
-    std::vector<amdgpu::ComputeUnitCore *> owners;
-    const bool per_xcc_areas = gpu->soc->arch() == ROCJITSU_CODE_ARCH_CDNA5;
-    const uint32_t area_count = per_xcc_areas ? std::max(1u, gpu->soc->num_xcds()) : 1u;
-    std::vector<std::vector<kmd::CwsrWaveState>> states_by_area(area_count);
-    auto collect = [&](amdgpu::CommandProcessor *cp, uint32_t area) {
-      for (auto *cu : cp->compute_units()) {
-        cu->with_wave_state_locked([&] {
-          for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
-            auto *wave = cu->wf(slot);
-            if (wave->debug_stopped() && wave->process_id() == proc->process_id() &&
-                wave->queue_id() == context.queue_id) {
-              stopped.push_back(wave);
-              states_by_area[area].push_back(build_cwsr_wave_state(*wave, gpu->soc->arch()));
-              owners.push_back(cu);
-            }
-          }
-        });
-      }
-    };
-    if (per_xcc_areas) {
-      for (uint32_t xcc_id = 0; xcc_id < area_count; ++xcc_id)
-        collect(gpu->soc->xcd(xcc_id)->command_processor(), xcc_id);
-    } else {
-      gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) { collect(cp, 0); });
-    }
-    bool restored = stopped.empty();
-    if (!stopped.empty() && context.base != 0) {
-      auto *memory = gpu->soc->memory();
-      UniqueDriverFd target_mem = duplicate_debug_target_mem(proc->client_pid());
-      bool read_ok = true;
-      auto read_block = [&](uint64_t address, std::span<uint8_t> bytes) {
-        if (target_mem.get() < 0) {
-          // A refused read leaves the span zero-filled, which deserializes as a
-          // valid-looking context: waves would resume with cleared registers and
-          // a zero program counter rather than staying stopped. The pread path
-          // below already treats a short read that way, and this is the same
-          // failure arriving through the memory model instead of the kernel.
-          if (memory->read_block(address, bytes, proc->process_id()) ==
-              amdgpu::AccessOutcome::Faulted) {
-            read_ok = false;
-            util::Logger::warn("CWSR target read faulted: addr=0x", std::hex, address, std::dec,
-                               " pid=", proc->client_pid());
-          }
-          return;
-        }
-        const ssize_t bytes_read =
-            pread(target_mem.get(), bytes.data(), bytes.size(), static_cast<off_t>(address));
-        if (bytes_read != static_cast<ssize_t>(bytes.size())) {
-          read_ok = false;
-          std::fill(bytes.begin(), bytes.end(), 0);
-          util::Logger::warn("CWSR target read failed: addr=0x", std::hex, address,
-                             " pid=", std::dec, proc->client_pid(), " rc=", bytes_read,
-                             " errno=", errno);
-        }
-      };
-      restored = true;
-      states.reserve(stopped.size());
-      for (uint32_t area = 0; area < area_count; ++area) {
-        auto &area_states = states_by_area[area];
-        if (area_states.empty())
-          continue;
-        prepare_cwsr_wave_states(area_states);
-        const uint64_t area_base = context.base + static_cast<uint64_t>(area) * context.size;
-        restored &= kmd::deserialize_queue_cwsr_bulk(area_base, context.size, area_states,
-                                                     read_block, gpu->soc->arch());
-        states.insert(states.end(), std::make_move_iterator(area_states.begin()),
-                      std::make_move_iterator(area_states.end()));
-      }
-      restored = restored && read_ok;
-    }
-    std::unordered_set<amdgpu::ComputeUnitCore *> wake;
-    if (restored) {
-      std::vector<size_t> matches;
-      matches.reserve(states.size());
-      std::vector<bool> matched(stopped.size());
-      for (const auto &state : states) {
-        auto find_match = [&](bool by_wave_id) {
-          for (size_t index = 0; index < stopped.size(); ++index) {
-            if (matched[index])
-              continue;
-            const auto *candidate = stopped[index];
-            if (by_wave_id ? state.wave_id != 0 && candidate->debug_wave_id() == state.wave_id
-                           : candidate->debug_wave_id() == 0 &&
-                                 candidate->aql_packet_id() == state.queue_packet_id &&
-                                 candidate->wg_coord() == state.group_ids &&
-                                 candidate->wave_in_group() == state.wave_in_group)
-              return index;
-          }
-          return stopped.size();
-        };
-        size_t index = find_match(true);
-        if (index == stopped.size())
-          index = find_match(false);
-        if (index == stopped.size()) {
-          restored = false;
-          break;
-        }
-        matched[index] = true;
-        matches.push_back(index);
-      }
-      restored = restored && matches.size() == stopped.size();
-      if (restored) {
-        for (size_t state_index = 0; state_index < states.size(); ++state_index) {
-          const size_t wave_index = matches[state_index];
-          if (!states[state_index].lds.empty())
-            stopped[wave_index]->lds().write(stopped[wave_index]->lds_base(),
-                                             states[state_index].lds.data(),
-                                             static_cast<uint32_t>(states[state_index].lds.size()));
-          owners[wave_index]->with_wave_state_locked([&] {
-            apply_cwsr_to_wave(*stopped[wave_index], states[state_index], gpu->soc->arch());
-          });
-        }
-      }
-    }
-    // This is the single commit point for debug_suspended: apply_cwsr_to_wave()
-    // leaves every wave suspended, so none of them runs until the whole queue's
-    // CWSR state and LDS have been restored above.
-    //
-    // Accumulated inside the locked loop below rather than read afterwards.
-    // The loop clears debug_suspended, which makes these waves runnable, so
-    // from that point the engine thread can be writing debug_halted_ -- a plain
-    // bool -- concurrently. This value decides whether the queue gate reopens,
-    // so reading it unlocked would race the answer as well as the byte.
-    bool keep_dispatch_suspended = false;
-    for (size_t index = 0; index < stopped.size(); ++index) {
-      owners[index]->with_wave_state_locked([&] {
-        const bool fatal_exception_pending = stopped[index]->fatal_exception_pending();
-        // A malformed or stale CWSR image must not strand a temporarily
-        // suspended wave after the queue gate is released. Architecturally
-        // halted waves remain halted until their CWSR record says otherwise.
-        stopped[index]->set_debug_suspended(fatal_exception_pending);
-        const bool halted = stopped[index]->debug_halted();
-        keep_dispatch_suspended |= halted;
-        if (!halted && !stopped[index]->is_halted())
-          if (!fatal_exception_pending)
-            wake.insert(owners[index]);
-      });
-    }
-    // Keep the queue-level launch gate closed until every resident wave has
-    // consumed its CWSR state and become runnable. Reopen it before scheduling
-    // those waves so CP completion processing cannot observe a queue as still
-    // suspended if a resumed wave completes immediately.
-    gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) {
-      cp->set_queue_debug_suspended(context.queue_id, proc->process_id(), keep_dispatch_suspended);
-    });
-    for (auto *cu : wake)
-      cu->schedule_work_async();
+    UniqueDriverFd target_mem = duplicate_debug_target_mem(proc->client_pid());
+    const bool restored = gpu->backend->debugger()->restore_queue(
+        {proc->process_id(), context.queue_id, context.base, context.size,
+         proc->client_pid(), target_mem.get()});
     if (restored)
       ++resumed;
     else
@@ -3944,7 +3496,7 @@ int SimulatedKfd::suspend_debug_queues(KfdProcess *proc, uint32_t *queue_ids, ui
   uint32_t suspended = 0;
   for (const auto &queue : queues) {
     auto *gpu = find_gpu(queue.info.gpu_id);
-    if (!gpu || !gpu->soc) {
+    if (!gpu || !gpu->backend || !gpu->backend->debugger()) {
       queue_ids[queue.request_index] |= kQueueError;
       continue;
     }
@@ -3956,48 +3508,16 @@ int SimulatedKfd::suspend_debug_queues(KfdProcess *proc, uint32_t *queue_ids, ui
       queue_ids[queue.request_index] |= kQueueError;
       continue;
     }
-    std::vector<std::pair<amdgpu::ComputeUnitCore *, amdgpu::Wavefront *>> newly_suspended;
-    gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) {
-      cp->set_queue_debug_suspended(queue.queue_id, process_id, true);
-      for (auto *cu : cp->compute_units()) {
-        cu->with_wave_state_locked([&] {
-          for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
-            auto *wave = cu->wf(slot);
-            if (!wave->is_halted() && !wave->debug_suspended() &&
-                wave->process_id() == process_id && wave->queue_id() == queue.queue_id) {
-              wave->set_debug_suspended(true);
-              newly_suspended.emplace_back(cu, wave);
-            }
-          }
-        });
-      }
+    const bool serialized = gpu->backend->debugger()->suspend_queue(process_id, queue.queue_id, [&] {
+      return queue.info.ctx_save_restore_address != 0 &&
+             serialize_queue_debug_waves(process_id, queue.queue_id, queue.info.gpu_id,
+                                         queue.info.ctx_save_restore_address,
+                                         queue.info.ctx_save_restore_area_size);
     });
-    bool serialized = newly_suspended.empty();
-    if (!newly_suspended.empty() && queue.info.ctx_save_restore_address != 0)
-      serialized = serialize_queue_debug_waves(process_id, queue.queue_id, queue.info.gpu_id,
-                                               queue.info.ctx_save_restore_address,
-                                               queue.info.ctx_save_restore_area_size);
-    if (serialized) {
+    if (serialized)
       ++suspended;
-      continue;
-    }
-    // No record was published, so the debugger has nothing to resume from.
-    // Undo the suspension rather than leave the queue wedged: reporting the
-    // error and stranding the waves is strictly worse than reporting it alone.
-    gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) {
-      cp->set_queue_debug_suspended(queue.queue_id, process_id, false);
-    });
-    amdgpu::ComputeUnitCore *woken = nullptr;
-    for (auto &[cu, wave] : newly_suspended) {
-      cu->with_wave_state_locked([w = wave] { w->set_debug_suspended(false); });
-      // Entries are appended compute unit by compute unit, so comparing against
-      // the last one woken collapses a CU's waves into a single wake.
-      if (cu != woken) {
-        cu->schedule_work_async();
-        woken = cu;
-      }
-    }
-    queue_ids[queue.request_index] |= kQueueError;
+    else
+      queue_ids[queue.request_index] |= kQueueError;
   }
   return static_cast<int>(suspended);
 }
@@ -4023,32 +3543,11 @@ void SimulatedKfd::clear_completed_debug_queues(KfdProcess *proc, const uint32_t
   }
   for (const auto &[queue_id, queue] : queues) {
     auto *gpu = find_gpu(queue.gpu_id);
-    if (!gpu || !gpu->soc || queue.ctx_save_restore_address == 0)
+    if (!gpu || !gpu->backend || !gpu->backend->debugger() || queue.ctx_save_restore_address == 0)
       continue;
-    bool has_stopped_wave = false;
-    gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) {
-      for (auto *cu : cp->compute_units()) {
-        cu->with_wave_state_locked([&] {
-          for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
-            const auto *wave = cu->wf(slot);
-            if (wave->debug_stopped() && wave->process_id() == process_id &&
-                wave->queue_id() == queue_id)
-              has_stopped_wave = true;
-          }
-        });
-      }
-    });
-    if (!has_stopped_wave) {
-      auto *memory = gpu->soc->memory();
-      const uint32_t area_count =
-          gpu->soc->arch() == ROCJITSU_CODE_ARCH_CDNA5 ? std::max(1u, gpu->soc->num_xcds()) : 1u;
-      for (uint32_t area = 0; area < area_count; ++area) {
-        const uint64_t area_base = queue.ctx_save_restore_address +
-                                   static_cast<uint64_t>(area) * queue.ctx_save_restore_area_size;
-        for (uint64_t offset = 0; offset < 40; offset += sizeof(uint32_t))
-          memory->write32(area_base + offset, 0, process_id);
-      }
-    }
+    gpu->backend->debugger()->clear_completed_queue(
+        {process_id, queue_id, queue.ctx_save_restore_address,
+         queue.ctx_save_restore_area_size, proc->client_pid(), -1});
   }
 }
 

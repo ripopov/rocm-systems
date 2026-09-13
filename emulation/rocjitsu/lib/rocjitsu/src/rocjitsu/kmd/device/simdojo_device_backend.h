@@ -35,6 +35,11 @@ private:
   void set_active(bool active) override;
   void release_queue(uint32_t process, uint32_t queue) override;
   bool signal_queue_exception(uint32_t process, uint32_t queue, uint64_t mask) override;
+  std::optional<uint64_t> save_queue(const DebugQueueContext &context) override;
+  bool restore_queue(const DebugQueueContext &context) override;
+  bool suspend_queue(uint32_t process, uint32_t queue,
+                     const std::function<bool()> &publish) override;
+  void clear_completed_queue(const DebugQueueContext &context) override;
   SoC &soc_;
 };
 
