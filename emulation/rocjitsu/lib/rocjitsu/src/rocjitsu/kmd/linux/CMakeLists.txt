@@ -22,6 +22,10 @@ target_link_libraries(rocjitsu_kmd_common PRIVATE ${CMAKE_DL_LIBS})
 add_library(rocjitsu_kmd_core STATIC $<TARGET_OBJECTS:rocjitsu_kmd_common>)
 target_link_libraries(rocjitsu_kmd_core PUBLIC util ${CMAKE_DL_LIBS} Threads::Threads)
 
+if(RJ_KMD_SERVER_ONLY)
+    return()
+endif()
+
 rj_add_object_library(rocjitsu_kmd
     ../device/simdojo_device_backend.cpp
     ../device/simdojo_debug.cpp
