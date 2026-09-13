@@ -3,6 +3,7 @@
 
 rj_add_object_library(rocjitsu_kmd
     ../device/simdojo_device_backend.cpp
+    ../device/simdojo_debug.cpp
     cwsr.cpp
     events.cpp
     guest_kfd.cpp
