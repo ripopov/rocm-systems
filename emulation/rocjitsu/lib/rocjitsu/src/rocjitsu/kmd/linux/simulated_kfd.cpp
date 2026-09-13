@@ -758,8 +758,6 @@ void SimulatedKfd::init_command_processors_locked() {
     auto &g = gpus_[i];
     if (g.cps_initialized)
       continue;
-    if (!g.soc)
-      continue;
     // The WAVES field the CP writes into compute_tmpring_size must be a
     // multiple of the per-XCC shader-engine count, or rocdbgapi disables
     // private memory access outright (architecture.cpp,
@@ -772,14 +770,6 @@ void SimulatedKfd::init_command_processors_locked() {
     // to and the divisor rocdbgapi applies cannot drift apart.
     const uint32_t scratch_wave_divisor =
         i < gpu_infos_.size() ? std::max(1u, gpu_infos_[i].num_shader_engines) : 1u;
-    const uint32_t xcc_count = g.soc->num_xcds();
-    for (uint32_t xcc_id = 0; xcc_id < xcc_count; ++xcc_id) {
-      auto *cp = g.soc->xcd(xcc_id)->command_processor();
-      if (!cp)
-        continue;
-      cp->set_scratch_wave_divisor(scratch_wave_divisor);
-      cp->set_scratch_xcc_layout(xcc_id, xcc_count);
-    }
     // Same source as the apertures GET_PROCESS_APERTURES_NEW and the DBG_TRAP
     // device snapshot advertise: what the shaders translate LDS/scratch against
     // must be what the runtime and the debugger were told.
@@ -810,38 +800,42 @@ void SimulatedKfd::init_command_processors_locked() {
             }
           }
         }
-        return 0;
-      });
-      cp->set_scratch_backing_allocator(
-          [this](uint32_t process_id, uint64_t gpu_va, size_t size) -> bool {
-            return allocate_scratch_backing(process_id, gpu_va, size);
-          });
-      for (auto *cu : cp->compute_units()) {
-        const uint32_t gpu_ordinal = static_cast<uint32_t>(i);
-        cu->set_trap_handler_resolver([this, gpu_ordinal](const amdgpu::Wavefront &wf) {
-          return resolve_trap_handler(wf, gpu_ordinal);
-        });
-        cu->set_sendmsg_handler([this](amdgpu::Wavefront &wf, uint32_t message) {
-          return on_wave_sendmsg(wf, message);
-        });
-        cu->set_trap_completion_handler(
-            [this](amdgpu::Wavefront &wf) { on_wave_trap_complete(wf); });
-        cu->set_single_step_handler(
-            [this](amdgpu::Wavefront &wf) { return on_wave_single_step_complete(wf); });
-        cu->set_watchpoint_handler([this](amdgpu::Wavefront &wf, uint64_t address, uint32_t bytes,
-                                          bool is_write, bool is_atomic) {
-          return on_wave_watchpoint(wf, address, bytes, is_write, is_atomic);
-        });
-        cu->set_illegal_inst_handler(
-            [this](amdgpu::Wavefront &wf) { return on_wave_illegal_instruction(wf); });
-        cu->set_alu_exception_handler(
-            [this](amdgpu::Wavefront &wf) { return on_wave_alu_exception(wf); });
-        cu->set_memory_violation_handler(
-            [this](amdgpu::Wavefront &wf, uint64_t address, bool is_write) {
-              return on_wave_memory_violation(wf, address, is_write);
-            });
       }
-    });
+      return 0;
+    };
+    callbacks.allocate_scratch = [this](uint32_t process_id, uint64_t gpu_va, size_t size) -> bool {
+      return allocate_scratch_backing(process_id, gpu_va, size);
+    };
+    g.backend->configure({ap.lds_base, ap.lds_limit, ap.scratch_base, ap.scratch_limit},
+                         scratch_wave_divisor, callbacks);
+    if (g.soc)
+      g.soc->for_each_cp([this, i](amdgpu::CommandProcessor *cp) {
+        for (auto *cu : cp->compute_units()) {
+          const uint32_t gpu_ordinal = static_cast<uint32_t>(i);
+          cu->set_trap_handler_resolver([this, gpu_ordinal](const amdgpu::Wavefront &wf) {
+            return resolve_trap_handler(wf, gpu_ordinal);
+          });
+          cu->set_sendmsg_handler([this](amdgpu::Wavefront &wf, uint32_t message) {
+            return on_wave_sendmsg(wf, message);
+          });
+          cu->set_trap_completion_handler(
+              [this](amdgpu::Wavefront &wf) { on_wave_trap_complete(wf); });
+          cu->set_single_step_handler(
+              [this](amdgpu::Wavefront &wf) { return on_wave_single_step_complete(wf); });
+          cu->set_watchpoint_handler([this](amdgpu::Wavefront &wf, uint64_t address, uint32_t bytes,
+                                            bool is_write, bool is_atomic) {
+            return on_wave_watchpoint(wf, address, bytes, is_write, is_atomic);
+          });
+          cu->set_illegal_inst_handler(
+              [this](amdgpu::Wavefront &wf) { return on_wave_illegal_instruction(wf); });
+          cu->set_alu_exception_handler(
+              [this](amdgpu::Wavefront &wf) { return on_wave_alu_exception(wf); });
+          cu->set_memory_violation_handler(
+              [this](amdgpu::Wavefront &wf, uint64_t address, bool is_write) {
+                return on_wave_memory_violation(wf, address, is_write);
+              });
+        }
+      });
     g.cps_initialized = true;
   }
 }
@@ -2049,7 +2043,7 @@ int SimulatedKfd::get_tile_config_ioctl(void *arg) {
     return -ENOTSUP;
 
   auto *gpu = find_gpu(args->gpu_id);
-  if (!gpu || !gpu->soc)
+  if (!gpu || !gpu->backend)
     return -EINVAL;
 
   uint32_t tile_write_count = std::min(args->num_tile_configs, kTileConfigCount);

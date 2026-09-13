@@ -4,11 +4,34 @@
 #include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/vm/amdgpu/command_processor.h"
 #include "rocjitsu/vm/amdgpu/gpu_memory.h"
+#include "rocjitsu/vm/amdgpu/xcd.h"
 #include "rocjitsu/vm/soc.h"
 
 #include <cerrno>
 
 namespace rocjitsu::kmd {
+
+rj_code_arch_t SimdojoDeviceBackend::architecture() const { return soc_.arch(); }
+
+void SimdojoDeviceBackend::configure(const DeviceApertures &apertures,
+                                     uint32_t scratch_wave_divisor,
+                                     const DeviceCallbacks &callbacks) {
+  const uint32_t xcc_count = soc_.num_xcds();
+  for (uint32_t xcc = 0; xcc < xcc_count; ++xcc) {
+    auto *cp = soc_.xcd(xcc)->command_processor();
+    if (!cp)
+      continue;
+    cp->set_scratch_wave_divisor(scratch_wave_divisor);
+    cp->set_scratch_xcc_layout(xcc, xcc_count);
+  }
+  soc_.set_apertures(apertures.lds_base, apertures.lds_limit, apertures.scratch_base,
+                     apertures.scratch_limit);
+  soc_.for_each_cp([&](amdgpu::CommandProcessor *cp) {
+    cp->set_interrupt_callback(callbacks.interrupt);
+    cp->set_scratch_backing_resolver(callbacks.scratch_backing);
+    cp->set_scratch_backing_allocator(callbacks.allocate_scratch);
+  });
+}
 
 void SimdojoDeviceBackend::set_memory_fault_reporter(MemoryFaultReporter *reporter) {
   if (auto *memory = soc_.memory())
