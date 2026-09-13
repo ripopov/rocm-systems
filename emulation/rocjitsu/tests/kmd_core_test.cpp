@@ -25,6 +25,9 @@ public:
   int registration_result = 0;
   int queue_result = 0;
   int live_processes = 0;
+  rocjitsu::kmd::DeviceAllocator *memory_allocator = nullptr;
+  std::vector<std::string> *lifecycle = nullptr;
+  rocjitsu::kmd::DeviceAllocator *allocator() override { return memory_allocator; }
   rj_code_arch_t architecture() const override { return ROCJITSU_CODE_ARCH_CDNA4; }
   void configure(const rocjitsu::kmd::DeviceApertures &, uint32_t,
                  const rocjitsu::kmd::DeviceCallbacks &) override {}
@@ -34,17 +37,174 @@ public:
       ++live_processes;
     return registration_result;
   }
-  void unregister_process(uint32_t) override { --live_processes; }
+  void unregister_process(uint32_t) override {
+    if (lifecycle)
+      lifecycle->push_back("unregister");
+    --live_processes;
+  }
   void set_process_client_pid(uint32_t, int32_t) override {}
   void set_process_mem_fd(uint32_t, int) override {}
   std::optional<uint32_t> queue_xcc(uint32_t) const override { return 0; }
   int create_queue(const rocjitsu::kmd::QueueDescriptor &) override { return queue_result; }
   void update_queue(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t) override {}
-  void destroy_queue(uint32_t, uint32_t) override {}
+  void destroy_queue(uint32_t, uint32_t) override {
+    if (lifecycle)
+      lifecycle->push_back("destroy_queue");
+  }
   void set_doorbell_base(uint32_t, void *) override {}
   uint64_t read64(uint32_t, uint64_t) override { return 0; }
   void write64(uint32_t, uint64_t, uint64_t) override {}
 };
+
+class TestDeviceAllocator : public rocjitsu::kmd::DeviceAllocator {
+public:
+  struct State {
+    int live = 0;
+    int released = 0;
+    std::vector<std::string> lifecycle;
+  };
+  struct Lease : rocjitsu::kmd::DeviceAllocation {
+    std::shared_ptr<State> state;
+    explicit Lease(std::shared_ptr<State> state) : state(std::move(state)) { ++this->state->live; }
+    ~Lease() override {
+      if (fd >= 0)
+        ::close(fd);
+      --state->live;
+      ++state->released;
+      state->lifecycle.push_back("release");
+    }
+  };
+  std::shared_ptr<State> state = std::make_shared<State>();
+  int result = 0;
+  bool invalid_range = false;
+  rocjitsu::kmd::DeviceAllocationRequest last_request{};
+  int allocate(const rocjitsu::kmd::DeviceAllocationRequest &request,
+               std::shared_ptr<rocjitsu::kmd::DeviceAllocation> &out) override {
+    last_request = request;
+    if (result != 0)
+      return result;
+    auto lease = std::make_shared<Lease>(state);
+    lease->fd = static_cast<int>(syscall(SYS_memfd_create, "backend-arena", MFD_CLOEXEC));
+    if (lease->fd < 0)
+      return -errno;
+    if (ftruncate(lease->fd, 16384) != 0)
+      return -errno;
+    lease->id = 77;
+    lease->device_address = 0x80000000;
+    lease->file_offset = invalid_range ? 16384 : 8192;
+    lease->size = 4096;
+    out = std::move(lease);
+    return 0;
+  }
+};
+
+TEST(KmdCoreTest, BackendAllocationFailureDoesNotFallBackOrPublishHandles) {
+  TestDeviceAllocator allocator;
+  auto backend = std::make_unique<TestDeviceBackend>();
+  backend->memory_allocator = &allocator;
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(backend)});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  ASSERT_NE(pid, 0);
+  auto process = driver.find_process(pid);
+  const auto next_handle = process->next_handle_;
+  const auto next_va = process->next_gpu_va_;
+  kfd_ioctl_alloc_memory_of_gpu_args args{};
+  args.gpu_id = 7;
+  args.size = 4096;
+  args.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  args.handle = 1234;
+  allocator.result = -ENOMEM;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args), -ENOMEM);
+  EXPECT_EQ(args.handle, 1234);
+  EXPECT_TRUE(process->allocations_.empty());
+  EXPECT_EQ(process->next_handle_, next_handle);
+  EXPECT_EQ(process->next_gpu_va_, next_va);
+  allocator.result = 0;
+  allocator.invalid_range = true;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args), -EINVAL);
+  EXPECT_EQ(allocator.state->live, 0);
+  EXPECT_EQ(allocator.state->released, 1);
+  EXPECT_TRUE(process->allocations_.empty());
+  EXPECT_EQ(process->next_handle_, next_handle);
+  EXPECT_EQ(process->next_gpu_va_, next_va);
+  EXPECT_EQ(driver.close(pid), 0);
+}
+
+TEST(KmdCoreTest, BackendAllocationLeaseLivesUntilLastIpcImportIsFreed) {
+  TestDeviceAllocator allocator;
+  auto backend = std::make_unique<TestDeviceBackend>();
+  backend->memory_allocator = &allocator;
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(backend)});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto source = driver.open_process();
+  const auto target = driver.open_process();
+  ASSERT_NE(source, 0);
+  ASSERT_NE(target, 0);
+  kfd_ioctl_alloc_memory_of_gpu_args args{};
+  args.gpu_id = 7;
+  args.size = 4096;
+  args.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  ASSERT_EQ(driver.ioctl(source, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &args), 0);
+  EXPECT_EQ(allocator.last_request.process_id, source);
+  EXPECT_EQ(allocator.last_request.gpu_va, args.va_addr);
+  auto process = driver.find_process(source);
+  const auto &allocation = process->allocations_.at(args.handle);
+  EXPECT_NE(allocation.memfd, allocation.device_allocation->fd);
+  EXPECT_EQ(allocation.memfd_offset, 8192);
+  kfd_ioctl_export_dmabuf_args dmabuf{};
+  dmabuf.handle = args.handle;
+  EXPECT_EQ(driver.ioctl(source, AMDKFD_IOC_EXPORT_DMABUF, &dmabuf), -ENOTSUP);
+  *static_cast<uint64_t *>(allocation.host_ptr) = 0x12345678;
+  kfd_ioctl_ipc_export_handle_args exported{};
+  exported.handle = args.handle;
+  ASSERT_EQ(driver.ioctl(source, AMDKFD_IOC_IPC_EXPORT_HANDLE, &exported), 0);
+  kfd_ioctl_ipc_import_handle_args imported{};
+  imported.gpu_id = 7;
+  std::memcpy(imported.share_handle, exported.share_handle, sizeof(imported.share_handle));
+  ASSERT_EQ(driver.ioctl(target, AMDKFD_IOC_IPC_IMPORT_HANDLE, &imported), 0);
+  ASSERT_EQ(driver.close(source), 0);
+  EXPECT_EQ(allocator.state->live, 1);
+  EXPECT_EQ(allocator.state->released, 0);
+  auto target_process = driver.find_process(target);
+  void *imported_mapping = target_process->allocations_.at(imported.handle).host_ptr;
+  EXPECT_EQ(*static_cast<uint64_t *>(imported_mapping), 0x12345678);
+  kfd_ioctl_free_memory_of_gpu_args free_args{};
+  free_args.handle = imported.handle;
+  ASSERT_EQ(driver.ioctl(target, AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), 0);
+  EXPECT_EQ(allocator.state->live, 0);
+  EXPECT_EQ(allocator.state->released, 1);
+  unsigned char residency = 0;
+  EXPECT_EQ(mincore(imported_mapping, 4096, &residency), -1);
+  EXPECT_EQ(errno, ENOMEM);
+  EXPECT_EQ(driver.close(target), 0);
+}
+
+TEST(KmdCoreTest, ShutdownStopsQueuesBeforeReleasingBackendBacking) {
+  TestDeviceAllocator allocator;
+  auto backend = std::make_unique<TestDeviceBackend>();
+  backend->memory_allocator = &allocator;
+  backend->lifecycle = &allocator.state->lifecycle;
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(backend)});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  ASSERT_NE(pid, 0);
+  kfd_ioctl_alloc_memory_of_gpu_args allocation{};
+  allocation.gpu_id = 7;
+  allocation.size = 4096;
+  allocation.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
+  kfd_ioctl_create_queue_args queue{};
+  queue.gpu_id = 7;
+  queue.queue_type = KFD_IOC_QUEUE_TYPE_COMPUTE_AQL;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_CREATE_QUEUE, &queue), 0);
+  ASSERT_EQ(driver.close(pid), 0);
+  EXPECT_EQ(allocator.state->lifecycle,
+            (std::vector<std::string>{"destroy_queue", "release", "unregister"}));
+}
 
 TEST(KmdCoreTest, DeviceRegistrationFailureRollsBackEarlierDevices) {
   auto first = std::make_unique<TestDeviceBackend>();

@@ -5,6 +5,7 @@
 #define ROCJITSU_KMD_DEVICE_DEVICE_BACKEND_H_
 
 #include "rocjitsu/code/rj_code.h"
+#include "rocjitsu/kmd/device/device_memory.h"
 #include "rocjitsu/kmd/device/memory_fault.h"
 
 #include <cstddef>
@@ -105,6 +106,7 @@ public:
   virtual ~DeviceBackend() = default;
   /// Null means debugger execution is unsupported, not a successful no-op.
   virtual DeviceDebugger *debugger() { return nullptr; }
+  virtual DeviceAllocator *allocator() { return nullptr; }
   virtual rj_code_arch_t architecture() const = 0;
   virtual void configure(const DeviceApertures &apertures, uint32_t scratch_wave_divisor,
                          const DeviceCallbacks &callbacks) = 0;

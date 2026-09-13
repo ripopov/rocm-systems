@@ -56,6 +56,7 @@ struct IpcObject {
   uint32_t share_handle[4];
   int backing_memfd = -1;
   uint64_t backing_offset = 0;
+  std::shared_ptr<kmd::DeviceAllocation> device_allocation;
   uint64_t allocation_size = 0;
   uint32_t allocation_flags = 0;
   uint32_t source_gpu_id = 0;

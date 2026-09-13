@@ -1239,6 +1239,12 @@ int SimulatedKfd::close(uint32_t process_id) {
     }
     pm4_queues_.clear();
   }
+  // Stop device accesses before releasing any allocation or doorbell backing.
+  // Do not hold alloc_mutex_: an engine may be completing a scratch request.
+  for (uint32_t qid : queue_ids)
+    for (auto &g : gpus_)
+      if (g.backend)
+        g.backend->destroy_queue(process_id, qid);
 
   const bool trace_enabled = vm_trace_enabled();
   size_t leaked_allocations = 0;
@@ -1376,6 +1382,24 @@ int SimulatedKfd::close(uint32_t process_id) {
     // import_dmabuf_ioctl/free_memory_ioctl); its fds were just closed above.
     proc.fd_to_import_handle_.clear();
   }
+
+  // Export handles die with the originating process; existing imports retain
+  // their own descriptor and lease, so their backing cannot be recycled here.
+  {
+    std::lock_guard<std::mutex> lock(ipc_mutex_);
+    for (auto it = ipc_store_.begin(); it != ipc_store_.end();) {
+      if (it->second.source_process_id == process_id) {
+        if (it->second.backing_memfd >= 0)
+          libc_passthrough().close(it->second.backing_memfd);
+        it = ipc_store_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (auto &g : gpus_)
+    if (g.backend)
+      g.backend->unregister_process(process_id);
 
   return 0;
 }
@@ -2150,7 +2174,49 @@ int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
   auto alloc_mtype = pte_mtype_for_flags(args->flags);
   bool is_userptr = (args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) != 0;
   bool is_doorbell = (args->flags & KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL) != 0;
-  if (is_userptr && !daemon_mode_) {
+  auto *gpu = find_gpu(args->gpu_id);
+  auto *allocator = gpu && gpu->backend ? gpu->backend->allocator() : nullptr;
+  if (!gpu && std::any_of(gpus_.begin(), gpus_.end(), [](const auto &device) {
+        return device.backend && device.backend->allocator();
+      }))
+    return -EINVAL;
+  if (allocator && !is_doorbell) {
+    // External backing must describe a page-mappable range. Unaligned USERPTR
+    // requires a containing-page lease, not an offset-zero fallback.
+    if (va & 0xFFF)
+      return -ENOTSUP;
+    const kmd::DeviceAllocationRequest request{proc.process_id(), va, args->size, args->flags};
+    const int result = allocator->allocate(request, alloc.device_allocation);
+    if (result != 0)
+      return result < 0 ? result : -EIO;
+    if (!alloc.device_allocation)
+      return -EIO;
+    const auto &storage = *alloc.device_allocation;
+    struct stat st{};
+    constexpr auto max_offset = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (storage.fd < 0 || storage.file_offset > max_offset ||
+        storage.size > max_offset - storage.file_offset || storage.size < alloc.size ||
+        (storage.file_offset & 0xFFF) || safe_fstat(storage.fd, &st) != 0 || st.st_size < 0 ||
+        storage.file_offset + storage.size > static_cast<uint64_t>(st.st_size))
+      return -EINVAL;
+    UniqueDriverFd backing(safe_fcntl(storage.fd, F_DUPFD_CLOEXEC, 0));
+    if (!backing)
+      return -errno;
+    auto *mapped = safe_mmap(nullptr, alloc.size, PROT_READ | PROT_WRITE, MAP_SHARED, backing.get(),
+                             static_cast<off_t>(storage.file_offset));
+    if (mapped == MAP_FAILED)
+      return -errno;
+    alloc.host_ptr = mapped;
+    alloc.host_ptr_owned = true;
+    alloc.memfd = backing.get();
+    alloc.memfd_offset = storage.file_offset;
+    map_to_gpu(proc, va, mapped, alloc.size, alloc_mtype, KfdProcess::HostExtentOwner::Driver);
+    {
+      std::lock_guard<std::mutex> lk(owned_fds_mutex_);
+      owned_fds_.insert(alloc.memfd);
+    }
+    static_cast<void>(backing.release());
+  } else if (is_userptr && !daemon_mode_) {
     alloc.host_ptr = reinterpret_cast<void *>(va);
     map_to_gpu(proc, va, reinterpret_cast<void *>(va), args->size, alloc_mtype);
   } else if (daemon_mode_ || !user_provided_va) {
@@ -2328,8 +2394,13 @@ int SimulatedKfd::free_memory_ioctl(KfdProcess &proc, void *arg) {
         proc.imported_dmabufs_.erase(dmabuf_it);
       }
     }
-    if (alloc.host_ptr && !alloc.user_va)
+    if (alloc.host_ptr && (!alloc.user_va || alloc.device_allocation))
       unmap_from_gpu(proc, alloc.gpu_va, alloc.size);
+    if (alloc.device_allocation && alloc.host_ptr && alloc.host_ptr_owned) {
+      safe_munmap(alloc.host_ptr, alloc.size);
+      alloc.host_ptr = nullptr;
+      alloc.host_ptr_owned = false;
+    }
     if (alloc.memfd >= 0) {
       {
         std::lock_guard<std::mutex> lk(owned_fds_mutex_);
@@ -2799,10 +2870,13 @@ int SimulatedKfd::set_memory_policy_ioctl(KfdProcess &proc, void *arg) {
 
 int SimulatedKfd::import_dmabuf_ioctl(KfdProcess &proc, void *arg) {
   auto *args = static_cast<kfd_ioctl_import_dmabuf_args *>(arg);
-  if (!find_gpu(args->gpu_id))
+  const auto *gpu = find_gpu(args->gpu_id);
+  if (!gpu)
     return -EINVAL;
+  if (gpu->backend && gpu->backend->allocator())
+    return -ENOTSUP; // No backend dma-buf attachment contract is implemented yet.
 
-  struct stat st {};
+  struct stat st{};
   if (safe_fstat(args->dmabuf_fd, &st) != 0)
     return -errno;
   uint64_t size = static_cast<uint64_t>(st.st_size);
@@ -2852,6 +2926,10 @@ int SimulatedKfd::export_dmabuf_ioctl(KfdProcess &proc, void *arg) {
   if (it == proc.allocations_.end())
     return -EINVAL;
   const auto &alloc = it->second;
+  // A raw file descriptor cannot convey a lease on a suballocation of a
+  // backend arena. KFD IPC does retain that lease; dma-buf export does not.
+  if (alloc.device_allocation)
+    return -ENOTSUP;
   if (alloc.memfd < 0)
     return -EINVAL;
   int dupfd = safe_fcntl(alloc.memfd, F_DUPFD_CLOEXEC, 0);
@@ -2868,6 +2946,7 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
   uint32_t alloc_flags = 0;
   uint32_t alloc_gpu_id = 0;
   uint64_t backing_offset = 0;
+  std::shared_ptr<kmd::DeviceAllocation> device_allocation;
   int dup_fd = -1;
 
   {
@@ -2935,6 +3014,7 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc_flags = alloc.flags;
     alloc_gpu_id = alloc.gpu_id;
     backing_offset = alloc.memfd_offset;
+    device_allocation = alloc.device_allocation;
     dup_fd = safe_fcntl(alloc.memfd, F_DUPFD_CLOEXEC, 0);
   }
 
@@ -2951,6 +3031,7 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
   std::memcpy(obj.share_handle, key.words, sizeof(key.words));
   obj.backing_memfd = dup_fd;
   obj.backing_offset = backing_offset;
+  obj.device_allocation = std::move(device_allocation);
   obj.allocation_size = alloc_size;
   obj.allocation_flags = alloc_flags;
   obj.source_gpu_id = alloc_gpu_id;
@@ -2979,6 +3060,7 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
   uint32_t alloc_flags = 0;
   uint32_t source_gpu_id = 0;
   uint64_t backing_offset = 0;
+  std::shared_ptr<kmd::DeviceAllocation> device_allocation;
 
   {
     std::lock_guard<std::mutex> lk(ipc_mutex_);
@@ -2989,6 +3071,7 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc_flags = it->second.allocation_flags;
     source_gpu_id = it->second.source_gpu_id;
     backing_offset = it->second.backing_offset;
+    device_allocation = it->second.device_allocation;
     dup_fd = safe_fcntl(it->second.backing_memfd, F_DUPFD_CLOEXEC, 0);
   }
 
@@ -3040,6 +3123,7 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc.host_ptr_owned = true;
     alloc.memfd = dup_fd;
     alloc.memfd_offset = backing_offset;
+    alloc.device_allocation = std::move(device_allocation);
     alloc.gpu_id = source_gpu_id;
     alloc.imported = true;
     proc.allocations_[handle] = alloc;

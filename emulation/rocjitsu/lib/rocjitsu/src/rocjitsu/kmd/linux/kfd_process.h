@@ -38,6 +38,10 @@
 
 namespace rocjitsu {
 
+namespace kmd {
+class DeviceAllocation;
+}
+
 /// @brief Per-process KFD state.
 ///
 /// @details Mirrors the kernel's kfd_process + kfd_process_device for a
@@ -104,6 +108,7 @@ public:
     uint64_t handle = 0;
     int memfd = -1;
     uint64_t memfd_offset = 0;
+    std::shared_ptr<kmd::DeviceAllocation> device_allocation;
     uint32_t gpu_id = 0;
     bool user_va = false;
     bool imported = false;
