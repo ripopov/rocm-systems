@@ -10,6 +10,7 @@ add_executable(kmd_rpc_server_tests
     kmd_rpc_server_test.cpp
     callback_dispatcher_test.cpp
     callback_memory_test.cpp
+    doorbell_monitor_test.cpp
     ${ROCJITSU_SRC_DIR}/rocjitsu/kmd/linux/kmd_rpc_server.cpp
 )
 target_link_libraries(kmd_rpc_server_tests PRIVATE util Threads::Threads GTest::gtest_main)
