@@ -131,6 +131,45 @@ public:
   }
 };
 
+TEST(KmdCoreTest, ExplicitTopologyRootIsIsolatedAndDoesNotChangeEnvironment) {
+  rocjitsu::test::ScopedTempDirectory first_root{"rj-embedded-topology-first-"};
+  rocjitsu::test::ScopedTempDirectory second_root{"rj-embedded-topology-second-"};
+  const char *environment = std::getenv("ROCJITSU_RUNTIME_DIR");
+  const std::optional<std::string> before = environment ? std::optional<std::string>(environment)
+                                                       : std::nullopt;
+  rocjitsu::Sysfs first, second;
+  rocjitsu::Sysfs::GpuInfo gpu{};
+  gpu.gpu_id = 7;
+  gpu.drm_render_minor = 128;
+  const auto first_path = first.generate(gpu, first_root.path());
+  ASSERT_FALSE(first_path.empty());
+  EXPECT_EQ(std::filesystem::path(first_path).parent_path(), first_root.path());
+  EXPECT_EQ(std::filesystem::path(first.drm_path()).parent_path(), first_root.path());
+  const auto second_path = second.generate(gpu, second_root.path());
+  ASSERT_FALSE(second_path.empty());
+  EXPECT_EQ(std::filesystem::path(second_path).parent_path(), second_root.path());
+  const auto second_drm = second.drm_path();
+  first.cleanup();
+  EXPECT_FALSE(std::filesystem::exists(first_path));
+  EXPECT_TRUE(std::filesystem::exists(first_root.path()));
+  EXPECT_TRUE(std::filesystem::exists(second_path));
+  EXPECT_TRUE(std::filesystem::exists(second_drm));
+  const char *after = std::getenv("ROCJITSU_RUNTIME_DIR");
+  EXPECT_EQ(after ? std::optional<std::string>(after) : std::nullopt, before);
+}
+
+TEST(KmdCoreTest, ExplicitInvalidTopologyRootDoesNotFallBackToDefaultDirectory) {
+  rocjitsu::test::ScopedTempDirectory root{"rj-embedded-topology-invalid-"};
+  const std::string blocker = root.path() + "/not-a-directory";
+  util::UniqueHandle file(::open(blocker.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600));
+  ASSERT_GE(file.get(), 0);
+  rocjitsu::Sysfs topology;
+  EXPECT_TRUE(topology.generate(rocjitsu::Sysfs::GpuInfo{}, blocker).empty());
+  EXPECT_TRUE(topology.path().empty());
+  EXPECT_TRUE(topology.drm_path().empty());
+  EXPECT_TRUE(std::filesystem::is_regular_file(blocker));
+}
+
 TEST(KmdCoreTest, BackendAllocationFailureDoesNotFallBackOrPublishHandles) {
   TestDeviceMemory allocator;
   auto backend = std::make_unique<TestDeviceBackend>();

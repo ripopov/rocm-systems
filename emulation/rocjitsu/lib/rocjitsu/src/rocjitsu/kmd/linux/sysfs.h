@@ -128,11 +128,14 @@ public:
   /// @brief Generate the sysfs topology directory for one or more GPUs.
   /// @param gpu GPU configuration to represent (single GPU).
   /// @returns Path to the generated directory.
-  std::string generate(const GpuInfo &gpu);
+  /// An explicit runtime_root is caller-owned: generate unique child trees
+  /// there without changing the environment or reaping sibling directories.
+  /// Empty uses the ordinary rocjitsu runtime root and stale-tree reaper.
+  std::string generate(const GpuInfo &gpu, const std::string &runtime_root = {});
 
   /// @brief Generate the sysfs topology directory for multiple GPUs.
   /// @param gpus Per-GPU configurations. Each gets its own topology node.
-  std::string generate(const std::vector<GpuInfo> &gpus);
+  std::string generate(const std::vector<GpuInfo> &gpus, const std::string &runtime_root = {});
 
   /// @brief Get the generated KFD topology path (empty if not yet generated).
   const std::string &path() const { return topology_dir_; }
@@ -161,7 +164,7 @@ private:
   void write_cpu_node(const std::string &nodes_dir, uint32_t num_gpu_links);
   void write_gpu_node(const std::string &nodes_dir, uint32_t node_idx, const GpuInfo &gpu,
                       uint32_t total_gpus);
-  void write_drm_tree(const std::vector<GpuInfo> &gpus);
+  void write_drm_tree(const std::vector<GpuInfo> &gpus, const std::string &runtime_root);
 };
 
 /// @brief Convert a parsed KFD device config into generated sysfs GPU metadata.

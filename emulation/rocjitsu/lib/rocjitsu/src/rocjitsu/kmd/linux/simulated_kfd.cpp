@@ -529,11 +529,11 @@ void SimulatedKfd::reap_exited_debug_sessions(std::stop_token stop) {
   }
 }
 
-void SimulatedKfd::setup_topology(const Sysfs::GpuInfo &gpu) {
+void SimulatedKfd::setup_topology(const Sysfs::GpuInfo &gpu, const std::string &runtime_root) {
   if (!gpus_.empty())
     gpus_[0].gpu_id = gpu.gpu_id;
   gpu_infos_ = {gpu};
-  topology_.generate(gpu);
+  topology_.generate(gpu, runtime_root);
   topology_.setup_environment();
 }
 

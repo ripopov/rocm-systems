@@ -174,7 +174,7 @@ public:
   /// @brief Local-mode get_mmap_memfd (uses local process).
   [[nodiscard]] int get_mmap_memfd(off_t offset) const;
 
-  void setup_topology(const Sysfs::GpuInfo &gpu);
+  void setup_topology(const Sysfs::GpuInfo &gpu, const std::string &runtime_root = {});
   void setup_topology(const config::KfdDeviceConfig &dev, uint32_t num_xcc);
   void setup_topology(const std::vector<config::KfdDeviceConfig> &devs, uint32_t num_xcc);
   bool is_doorbell_range(const void *addr, size_t length) const override;
