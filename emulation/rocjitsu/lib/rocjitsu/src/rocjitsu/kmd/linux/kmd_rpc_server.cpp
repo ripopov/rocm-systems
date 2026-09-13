@@ -45,12 +45,37 @@ struct KmdRpcState {
   ino_t socket_inode = 0;
   std::mutex clients_mutex;
   std::vector<int> client_fds;
+  uint64_t pending_requests = 0;
+  std::function<void()> state_changed;
   std::jthread accept_thread;
 };
 
 namespace {
 
 using namespace rocjitsu;
+
+void notify_state(KmdRpcState *state) noexcept {
+  if (state->state_changed)
+    state->state_changed();
+}
+
+class PendingRequest {
+public:
+  explicit PendingRequest(KmdRpcState *state) : state_(state) {
+    std::lock_guard lock(state_->clients_mutex);
+    ++state_->pending_requests;
+    notify_state(state_);
+  }
+  ~PendingRequest() {
+    std::lock_guard lock(state_->clients_mutex);
+    --state_->pending_requests;
+    notify_state(state_);
+  }
+  PendingRequest(const PendingRequest &) = delete;
+  PendingRequest &operator=(const PendingRequest &) = delete;
+private:
+  KmdRpcState *state_;
+};
 
 bool checked_product(size_t lhs, size_t rhs, size_t *product) {
   if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs)
@@ -196,6 +221,7 @@ void close_client(KmdRpcState *daemon, int client_fd) {
   if (position != daemon->client_fds.end())
     daemon->client_fds.erase(position);
   ::close(client_fd);
+  notify_state(daemon);
 }
 
 void interrupt_transport(KmdRpcState *daemon) {
@@ -206,6 +232,7 @@ void interrupt_transport(KmdRpcState *daemon) {
   std::lock_guard lock(daemon->clients_mutex);
   for (int fd : daemon->client_fds)
     ::shutdown(fd, SHUT_RDWR);
+  notify_state(daemon);
 }
 
 void mark_error(KmdRpcState *daemon) {
@@ -246,6 +273,7 @@ public:
         if (!receive_header_with_fds(client_fd_, &header, &input_fds))
           break;
 
+        PendingRequest pending(daemon_);
         if (header.reserved != 0 ||
             handle_request(header, input_fds) == RequestDisposition::Disconnect) {
           break;
@@ -485,7 +513,8 @@ void accept_clients(KmdRpcState *daemon, std::stop_token stop) {
         return client.complete->load(std::memory_order_acquire);
       });
 
-      const int client_fd = accept4(daemon->listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
+      util::UniqueHandle accepted(accept4(daemon->listen_fd, nullptr, nullptr, SOCK_CLOEXEC));
+      const int client_fd = accepted.get();
       if (client_fd < 0) {
         if (errno == EINTR)
           continue;
@@ -498,10 +527,11 @@ void accept_clients(KmdRpcState *daemon, std::stop_token stop) {
         // accept4 concurrently with listener shutdown must not become a client.
         if (daemon->accepting_stopped.load(std::memory_order_acquire) ||
             daemon->stop_requested.load(std::memory_order_acquire)) {
-          ::close(client_fd);
           break;
         }
         daemon->client_fds.push_back(client_fd);
+        (void)accepted.release(); // Published client list now owns the descriptor.
+        notify_state(daemon);
       }
       try {
         client_threads.reserve(client_threads.size() + 1);
@@ -560,6 +590,7 @@ void teardown(KmdRpcState *daemon) {
   remove_owned_socket(daemon);
 
   daemon->status.store(RJ_DAEMON_STATUS_STOPPED, std::memory_order_release);
+  notify_state(daemon);
 }
 
 bool remove_stale_socket(const KmdRpcState *daemon, const sockaddr_un &address,
@@ -633,8 +664,10 @@ rj_status_t bind_socket(KmdRpcState *daemon) {
 
 } // namespace
 
-KmdRpcServer::KmdRpcServer(KmdRpcDevice &device) : state_(std::make_unique<KmdRpcState>()) {
+KmdRpcServer::KmdRpcServer(KmdRpcDevice &device, std::function<void()> state_changed)
+    : state_(std::make_unique<KmdRpcState>()) {
   state_->device = &device;
+  state_->state_changed = std::move(state_changed);
 }
 
 KmdRpcServer::~KmdRpcServer() { stop(); }
@@ -675,6 +708,11 @@ void KmdRpcServer::fail() { mark_error(state_.get()); }
 
 rj_daemon_status_t KmdRpcServer::status() const {
   return state_->status.load(std::memory_order_acquire);
+}
+
+KmdRpcStatistics KmdRpcServer::statistics() const {
+  std::lock_guard lock(state_->clients_mutex);
+  return {state_->client_fds.size(), state_->pending_requests};
 }
 
 } // namespace rocjitsu

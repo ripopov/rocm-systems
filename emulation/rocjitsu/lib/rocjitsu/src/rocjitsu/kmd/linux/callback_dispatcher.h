@@ -39,6 +39,10 @@ public:
 
   int fd() const { return notification_.get(); }
 
+  /// Wake the owner for transport state changes that need no device callback.
+  /// Safe while holding transport locks; dispatch() also consumes these wakes.
+  void wake() noexcept { notify(); }
+
   template <typename Function> auto invoke(Function &&function) -> std::invoke_result_t<Function> {
     if (std::this_thread::get_id() == owner_)
       return std::invoke(std::forward<Function>(function));
