@@ -3,13 +3,57 @@
 
 #include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/vm/amdgpu/command_processor.h"
+#include "rocjitsu/vm/amdgpu/compute_unit.h"
 #include "rocjitsu/vm/amdgpu/gpu_memory.h"
+#include "rocjitsu/vm/amdgpu/wavefront.h"
 #include "rocjitsu/vm/amdgpu/xcd.h"
 #include "rocjitsu/vm/soc.h"
 
 #include <cerrno>
 
 namespace rocjitsu::kmd {
+
+void SimdojoDeviceBackend::set_active(bool active) {
+  soc_.for_each_cp([&](amdgpu::CommandProcessor *cp) {
+    for (auto *cu : cp->compute_units())
+      cu->set_debug_active(active);
+  });
+}
+
+void SimdojoDeviceBackend::release_queue(uint32_t process, uint32_t queue) {
+  soc_.for_each_cp([&](amdgpu::CommandProcessor *cp) {
+    cp->set_queue_debug_suspended(queue, process, false);
+    for (auto *cu : cp->compute_units()) {
+      bool wake = false;
+      cu->with_wave_state_locked([&] {
+        for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
+          auto *wave = cu->wf(slot);
+          if (wave->is_halted() || wave->process_id() != process || wave->queue_id() != queue ||
+              wave->fatal_exception_pending())
+            continue;
+          wave->set_debug_single_step(false);
+          wave->set_debug_halted(false);
+          wave->set_debug_suspended(false);
+          // s_sendmsghalt also raises architectural STATUS.HALT. Clear it so
+          // returning from the trap cannot re-halt after the debugger detaches.
+          wave->set_status_halt(false);
+          wave->set_self_halted(false);
+          wake = true;
+        }
+      });
+      if (wake)
+        cu->schedule_work_async();
+    }
+  });
+}
+
+bool SimdojoDeviceBackend::signal_queue_exception(uint32_t process, uint32_t queue, uint64_t mask) {
+  bool delivered = false;
+  soc_.for_each_cp([&](amdgpu::CommandProcessor *cp) {
+    delivered |= cp->signal_queue_exception(queue, process, mask);
+  });
+  return delivered;
+}
 
 rj_code_arch_t SimdojoDeviceBackend::architecture() const { return soc_.arch(); }
 

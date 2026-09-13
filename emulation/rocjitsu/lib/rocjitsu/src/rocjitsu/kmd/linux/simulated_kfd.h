@@ -94,6 +94,12 @@ public:
                DebugIdentityValidationHook debug_identity_validation_hook = {});
   SimulatedKfd(std::vector<SoC *> socs, std::vector<uint32_t> gpu_ids, bool daemon_mode = false,
                DebugIdentityValidationHook debug_identity_validation_hook = {});
+  struct BackendDevice {
+    uint32_t gpu_id;
+    std::unique_ptr<kmd::DeviceBackend> backend;
+  };
+  explicit SimulatedKfd(std::vector<BackendDevice> devices, bool daemon_mode = true,
+               DebugIdentityValidationHook debug_identity_validation_hook = {});
   ~SimulatedKfd() override;
 
   /// @brief Local-mode interface (interposer). Operates on the local process.

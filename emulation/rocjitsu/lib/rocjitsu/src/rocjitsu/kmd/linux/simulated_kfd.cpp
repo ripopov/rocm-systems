@@ -36,6 +36,7 @@ RJ_DIAGNOSTIC_POP
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <fcntl.h>
 #include <format>
 #include <iterator>
@@ -530,6 +531,27 @@ SimulatedKfd::SimulatedKfd(std::vector<SoC *> socs, std::vector<uint32_t> gpu_id
     device.legacy_vm =
         std::make_unique<amdgpu::LegacyGpuVmAdapter>(socs[i]->gpu_vm(), socs[i]->memory());
     gpus_.push_back(std::move(device));
+  }
+}
+
+SimulatedKfd::SimulatedKfd(std::vector<BackendDevice> devices, bool daemon_mode,
+                           DebugIdentityValidationHook debug_identity_validation_hook)
+    : daemon_mode_(daemon_mode),
+      debug_identity_validation_hook_(std::move(debug_identity_validation_hook)),
+      debug_session_reaper_([this](std::stop_token stop) { reap_exited_debug_sessions(stop); }) {
+  if (devices.empty())
+    throw std::invalid_argument("KFD requires at least one device");
+  std::unordered_set<uint32_t> identities;
+  for (size_t i = 0; i < devices.size(); ++i) {
+    if (!devices[i].backend || !identities.insert(devices[i].gpu_id).second)
+      throw std::invalid_argument("KFD requires non-null devices with distinct GPU identities");
+  }
+  libc_passthrough().resolve();
+  for (size_t i = 0; i < devices.size(); ++i) {
+    GpuDevice gpu;
+    gpu.backend = std::move(devices[i].backend);
+    gpu.gpu_id = devices[i].gpu_id;
+    gpus_.push_back(std::move(gpu));
   }
 }
 
@@ -3945,12 +3967,8 @@ void SimulatedKfd::release_debug_checks_if_last_session() {
 
 void SimulatedKfd::set_debug_active_on_all_cus(bool active) {
   for (auto &gpu : gpus_) {
-    if (!gpu.soc)
-      continue;
-    gpu.soc->for_each_cp([&](amdgpu::CommandProcessor *cp) {
-      for (auto *cu : cp->compute_units())
-        cu->set_debug_active(active);
-    });
+    if (gpu.backend && gpu.backend->debugger())
+      gpu.backend->debugger()->set_active(active);
   }
 }
 
@@ -4641,6 +4659,11 @@ bool queues_all_dead(KfdProcess *proc, const kfd_ioctl_dbg_trap_args &args) {
 // in real kernel, amd/amdkfd/kfd_chardev.c kfd_ioctl_set_debug_trap
 int SimulatedKfd::debug_trap_ioctl(KfdProcess &caller, void *arg, int *target_mem_fd,
                                    int target_proc_fd) {
+  // A session controls the process across all advertised devices. Do not
+  // advertise a usable debugger when part of that execution cannot be stopped.
+  for (const auto &gpu : gpus_)
+    if (!gpu.backend || !gpu.backend->debugger())
+      return -ENOTSUP;
   auto *args = static_cast<kfd_ioctl_dbg_trap_args *>(arg);
   util::Logger::driver("DBG_TRAP pid=", args->pid, " op=", args->op);
   // rocjitsu always models hardware scheduling, so the driver's
@@ -5021,7 +5044,7 @@ int SimulatedKfd::debug_trap_ioctl(KfdProcess &caller, void *arg, int *target_me
       if (target_proc == nullptr)
         return -ESRCH;
       auto *gpu = find_gpu(event.gpu_id);
-      if (!gpu || !gpu->soc)
+      if (!gpu || !gpu->backend)
         return -ENODEV;
       // Drop debug_sessions_mutex_ first: signal_queue_exception() takes the CU
       // wave-state lock and waits up to a second for the target to observe the
@@ -5032,11 +5055,8 @@ int SimulatedKfd::debug_trap_ioctl(KfdProcess &caller, void *arg, int *target_me
       // would additionally stall every trap callback for the duration of the
       // wait. Nothing below this point reads debug_sessions_ or session_it.
       lk.unlock();
-      bool delivered = false;
-      gpu->soc->for_each_cp([&](amdgpu::CommandProcessor *cp) {
-        delivered |= cp->signal_queue_exception(event.queue_id, target_proc->process_id(),
-                                                event.exception_mask);
-      });
+      const bool delivered = gpu->backend->debugger()->signal_queue_exception(
+          target_proc->process_id(), event.queue_id, event.exception_mask);
       return delivered ? 0 : -ENOENT;
     }
     std::lock_guard<std::mutex> runtime_lock(runtime_handshake_mutex_);
