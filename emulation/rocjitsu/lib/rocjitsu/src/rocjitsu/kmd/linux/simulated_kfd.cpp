@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
+#include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/amdgpu_properties.h"
 #include "rocjitsu/kmd/linux/cwsr.h"
 #include "rocjitsu/kmd/linux/host_mapping_lock.h"
@@ -465,7 +466,7 @@ void SimulatedKfd::update_cp_doorbell_base(uint32_t gpu_ordinal, uint32_t proces
   if (gpu_ordinal >= gpus_.size())
     return;
   auto &g = gpus_[gpu_ordinal];
-  if (!g.soc)
+  if (!g.backend)
     return;
   g.soc->set_process_doorbell_base(process_id, base);
 }
@@ -524,6 +525,7 @@ SimulatedKfd::SimulatedKfd(std::vector<SoC *> socs, std::vector<uint32_t> gpu_id
   for (size_t i = 0; i < socs.size(); ++i) {
     GpuDevice device;
     device.soc = socs[i];
+    device.backend = std::make_unique<kmd::SimdojoDeviceBackend>(*socs[i]);
     device.gpu_id = i < gpu_ids.size() ? gpu_ids[i] : socs[i]->gpu_id();
     device.legacy_vm =
         std::make_unique<amdgpu::LegacyGpuVmAdapter>(socs[i]->gpu_vm(), socs[i]->memory());
@@ -2376,7 +2378,7 @@ int SimulatedKfd::unmap_memory_ioctl(KfdProcess &proc, void *arg) {
 int SimulatedKfd::create_queue_ioctl(KfdProcess &proc, void *arg) {
   auto *args = static_cast<kfd_ioctl_create_queue_args *>(arg);
   auto *gpu = find_gpu(args->gpu_id);
-  if (!gpu || !gpu->soc)
+  if (!gpu || !gpu->backend)
     return -EINVAL;
 
   const bool is_pm4_compute = args->queue_type == KFD_IOC_QUEUE_TYPE_COMPUTE;
@@ -2589,7 +2591,7 @@ int SimulatedKfd::create_queue_ioctl(KfdProcess &proc, void *arg) {
         .gpu_id = args->gpu_id,
         // The gfx1250 debugger ABI publishes each queue in its owning XCC
         // save area. Preserve the legacy single-area model for older targets.
-        .xcc_id = gpu->soc->arch() == ROCJITSU_CODE_ARCH_CDNA5 ? target_xcc_id : 0,
+        .xcc_id = *target_xcc_id,
         .exception_status = KFD_EC_MASK(EC_QUEUE_NEW),
     };
   } catch (const std::bad_alloc &) {
