@@ -131,12 +131,12 @@ public:
   /// device that faulted: the runtime maps gpu_id to a node and surfaces it, so
   /// a shared reporter that guessed would misattribute a fault from any device
   /// but the first.
-  class GpuFaultReporter : public amdgpu::MemoryFaultReporter {
+  class GpuFaultReporter : public kmd::MemoryFaultReporter {
   public:
     GpuFaultReporter(SimulatedKfd *driver, uint32_t gpu_id) : driver_(driver), gpu_id_(gpu_id) {}
 
     void report_memory_fault(uint32_t vmid, uint64_t addr,
-                             amdgpu::MemoryFaultCause cause) override {
+                             kmd::MemoryFaultCause cause) override {
       driver_->report_memory_fault(vmid, addr, gpu_id_, cause);
     }
 
@@ -153,7 +153,7 @@ public:
   /// silicon. A process that registered no such event gets a warning instead,
   /// because the violation would otherwise vanish silently.
   void report_memory_fault(uint32_t vmid, uint64_t addr, uint32_t gpu_id,
-                           amdgpu::MemoryFaultCause cause);
+                           kmd::MemoryFaultCause cause);
 
   int ioctl(uint32_t process_id, unsigned long request, void *arg, int *target_mem_fd = nullptr,
             int target_proc_fd = -1);
@@ -292,6 +292,8 @@ public:
   GpuFaultReporter *fault_reporter_for(GpuDevice &gpu);
 
 private:
+  /// Install a process on every device, rolling back on the first failure.
+  int register_device_process(KfdProcess &process, bool passthrough);
   /// @brief Look up the local-mode process.
   std::shared_ptr<KfdProcess> find_local_process() const;
 

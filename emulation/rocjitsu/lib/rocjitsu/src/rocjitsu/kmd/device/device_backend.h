@@ -4,10 +4,14 @@
 #ifndef ROCJITSU_KMD_DEVICE_DEVICE_BACKEND_H_
 #define ROCJITSU_KMD_DEVICE_DEVICE_BACKEND_H_
 
+#include "rocjitsu/kmd/device/memory_fault.h"
+
 #include <cstdint>
 #include <optional>
 
-namespace rocjitsu::kmd {
+namespace rocjitsu {
+class KfdProcess;
+namespace kmd {
 
 /// @brief A queue programmed by KFD, independent of the execution engine.
 struct QueueDescriptor {
@@ -35,6 +39,15 @@ struct QueueDescriptor {
 class DeviceBackend {
 public:
   virtual ~DeviceBackend() = default;
+  virtual void set_memory_fault_reporter(MemoryFaultReporter *reporter) = 0;
+  /// Borrow the common process address space until unregister_process returns.
+  /// A negative errno leaves no device-side process state. Passthrough is only
+  /// valid when the application and device execute in the same host process.
+  virtual int register_process(KfdProcess &process, bool passthrough) = 0;
+  virtual void unregister_process(uint32_t process) = 0;
+  virtual void set_process_client_pid(uint32_t process, int32_t client_pid) = 0;
+  /// Borrow a debugger-authorized /proc/pid/mem descriptor; -1 revokes it.
+  virtual void set_process_mem_fd(uint32_t process, int fd) = 0;
   /// Return the debugger-visible XCC of a queue, or no value if unavailable.
   virtual std::optional<uint32_t> queue_xcc(uint32_t ordinal) const = 0;
   /// Return zero on installation, or a negative errno with no retained queue
@@ -48,6 +61,7 @@ public:
   virtual void write64(uint32_t process, uint64_t address, uint64_t value) = 0;
 };
 
-} // namespace rocjitsu::kmd
+} // namespace kmd
+} // namespace rocjitsu
 
 #endif

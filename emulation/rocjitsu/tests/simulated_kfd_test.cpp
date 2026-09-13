@@ -5,6 +5,7 @@
 /// @brief Tests for SimulatedKfd creation, open/close, and topology generation.
 
 #include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/guest_kfd.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
 #include "rocjitsu/vm/rj_vm.h"
@@ -113,6 +114,38 @@ TEST_F(SimulatedKfdTest, OpenAndClose) {
 
   int ret = t.driver()->close();
   EXPECT_EQ(ret, 0);
+}
+
+TEST_F(SimulatedKfdTest, DeviceProcessMappingIsolationRemapAndTeardown) {
+  auto t = create_test_vm();
+  auto *vm = dynamic_cast<rocjitsu::VirtualMachine *>(t.engine->topology().root());
+  ASSERT_NE(vm, nullptr);
+  rocjitsu::kmd::SimdojoDeviceBackend backend(*vm->soc(0));
+  rocjitsu::KfdProcess first(101, 1);
+  rocjitsu::KfdProcess second(102, 1);
+  alignas(4096) std::array<uint64_t, 512> first_page{};
+  alignas(4096) std::array<uint64_t, 512> second_page{};
+  constexpr uint64_t address = 0x100000000;
+  first_page[0] = 17;
+  second_page[0] = 29;
+  first.map_pages(address, first_page.data(), sizeof(first_page), rocjitsu::amdgpu::Mtype::UC);
+  second.map_pages(address, second_page.data(), sizeof(second_page), rocjitsu::amdgpu::Mtype::UC);
+  ASSERT_EQ(backend.register_process(first, false), 0);
+  ASSERT_EQ(backend.register_process(second, false), 0);
+  EXPECT_EQ(backend.read64(first.process_id(), address), 17);
+  EXPECT_EQ(backend.read64(second.process_id(), address), 29);
+  backend.write64(first.process_id(), address, 43);
+  EXPECT_EQ(first_page[0], 43);
+  EXPECT_EQ(second_page[0], 29);
+
+  first.unmap_pages(address, sizeof(first_page));
+  first.map_pages(address, second_page.data(), sizeof(second_page), rocjitsu::amdgpu::Mtype::UC);
+  EXPECT_EQ(backend.read64(first.process_id(), address), 29);
+  backend.unregister_process(first.process_id());
+  EXPECT_EQ(backend.read64(first.process_id(), address), 0);
+  EXPECT_EQ(backend.read64(second.process_id(), address), 29);
+  backend.unregister_process(second.process_id());
+  EXPECT_EQ(backend.read64(second.process_id(), address), 0);
 }
 
 TEST_F(SimulatedKfdTest, DoorbellClientRemapKeepsDriverAliasStableWhenOffsetRecycles) {

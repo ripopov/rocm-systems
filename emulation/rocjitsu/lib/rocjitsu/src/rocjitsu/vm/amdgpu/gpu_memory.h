@@ -7,6 +7,7 @@
 #ifndef ROCJITSU_VM_AMDGPU_GPU_MEMORY_H_
 #define ROCJITSU_VM_AMDGPU_GPU_MEMORY_H_
 
+#include "rocjitsu/kmd/device/memory_fault.h"
 #include "rocjitsu/kmd/linux/host_access_guard.h"
 #include "rocjitsu/kmd/linux/host_mapping_lock.h"
 #include "rocjitsu/kmd/linux/kfd_process.h"
@@ -77,21 +78,7 @@ static_assert(KfdProcess::kPageSize == simdojo::SparseMemory::PAGE_SIZE,
 /// violation to whoever is emulating the driver. Keeping this an interface
 /// rather than a direct call is what stops the memory model depending on the
 /// KFD emulation it is used by.
-/// @brief Why an access was refused, mapped onto what the driver reports.
-/// @details The KFD ABI separates a page that is not there from one that is
-/// there but refuses the write, and the runtime reads the two fields
-/// separately, so collapsing them would misstate the cause.
-enum class MemoryFaultCause : uint8_t {
-  NotPresent, ///< No mapping at the address, or it is inaccessible outright.
-  ReadOnly,   ///< The page is readable, but rejected the write.
-  /// @brief The simulator could not establish the mapping's protection.
-  /// @details Not a property of the address at all: procfs could not be opened
-  /// or read through. The access still fails closed, but reporting it as a
-  /// protection violation would blame the workload for the simulator running
-  /// out of descriptors, so it is raised with no failure cause set -- an
-  /// imprecise violation -- and named distinctly in the log.
-  Indeterminate,
-};
+using kmd::MemoryFaultCause;
 
 /// @brief What the kernel's record says about storing through a host page.
 /// @details Read-only and absent are kept apart because the runtime reads the
@@ -113,30 +100,7 @@ struct PendingFault {
   MemoryFaultCause cause = MemoryFaultCause::NotPresent;
 };
 
-class MemoryFaultReporter {
-public:
-  virtual ~MemoryFaultReporter() = default;
-
-  /// @brief Report that @p addr could not be serviced for @p vmid.
-  ///
-  /// @details Called from simulation threads, so implementations must be
-  /// thread-safe. Each GpuMemory binds its own reporter, so the implementation
-  /// knows which device faulted without being told; a shared reporter would
-  /// have to guess, and would name the wrong one.
-  ///
-  /// Calling back into GpuMemory is permitted, and is why delivery is deferred
-  /// at all: this runs from ~FaultDispatch, after the access that recorded the
-  /// fault has released the VMID and page-table locks, so a reporter is free to
-  /// take the driver locks that reach GpuMemory from the other direction. A
-  /// reporter that could not do that would be unable to reach the driver, which
-  /// is the only thing it exists to do.
-  ///
-  /// The one thing it must not do is perform an access that itself faults. The
-  /// pending slot is cleared before this call, so a nested fault arms a fresh
-  /// one and the nested guard delivers it -- to this same reporter, without
-  /// bound.
-  virtual void report_memory_fault(uint32_t vmid, uint64_t addr, MemoryFaultCause cause) = 0;
-};
+using kmd::MemoryFaultReporter;
 
 /// @brief Why a block access ended, once a faulted address is distinguishable
 /// from memory that is simply not backed yet.

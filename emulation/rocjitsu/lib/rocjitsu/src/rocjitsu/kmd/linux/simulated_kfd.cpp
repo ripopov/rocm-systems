@@ -484,8 +484,8 @@ SimulatedKfd::~SimulatedKfd() {
   // The memory model may outlive this driver, and it holds a bare pointer to
   // us for fault reporting. Retract it while we are still whole.
   for (auto &g : gpus_) {
-    if (auto *mem = g.soc ? g.soc->memory() : nullptr)
-      mem->set_memory_fault_reporter(nullptr);
+    if (g.backend)
+      g.backend->set_memory_fault_reporter(nullptr);
   }
 }
 
@@ -789,14 +789,10 @@ int SimulatedKfd::open() {
   // point), so the stale value is unobservable until exec replaces the image.
   proc->set_client_pid(static_cast<pid_t>(getpid()));
   proc->event_state_.reset();
-  for (auto &g : gpus_) {
-    if (auto *mem = g.soc ? g.soc->memory() : nullptr) {
-      mem->register_process(pid, &proc->page_table_, &proc->page_table_mutex_,
-                            proc->page_table_generation(), proc->page_table_request_mutex());
-      mem->set_memory_fault_reporter(fault_reporter_for(g));
-      if (!daemon_mode_)
-        mem->set_passthrough(true);
-    }
+  const int result = register_device_process(*proc, !daemon_mode_);
+  if (result < 0) {
+    errno = -result;
+    return -1;
   }
   processes_[pid] = proc;
   local_process_id_ = pid;
@@ -811,6 +807,20 @@ int SimulatedKfd::open() {
   return fd_.load(std::memory_order_acquire);
 }
 
+int SimulatedKfd::register_device_process(KfdProcess &process, bool passthrough) {
+  for (size_t i = 0; i < gpus_.size(); ++i) {
+    auto &gpu = gpus_[i];
+    const int result = gpu.backend->register_process(process, passthrough);
+    if (result < 0) {
+      while (i > 0)
+        gpus_[--i].backend->unregister_process(process.process_id());
+      return result;
+    }
+    gpu.backend->set_memory_fault_reporter(fault_reporter_for(gpu));
+  }
+  return 0;
+}
+
 SimulatedKfd::GpuFaultReporter *SimulatedKfd::fault_reporter_for(GpuDevice &gpu) {
   if (!gpu.fault_reporter)
     gpu.fault_reporter = std::make_unique<GpuFaultReporter>(this, gpu.gpu_id);
@@ -818,7 +828,7 @@ SimulatedKfd::GpuFaultReporter *SimulatedKfd::fault_reporter_for(GpuDevice &gpu)
 }
 
 void SimulatedKfd::report_memory_fault(uint32_t vmid, uint64_t addr, uint32_t gpu_id,
-                                       amdgpu::MemoryFaultCause cause) {
+                                       kmd::MemoryFaultCause cause) {
   std::shared_ptr<KfdProcess> proc;
   {
     std::lock_guard<std::mutex> lk(process_mutex_);
@@ -836,8 +846,8 @@ void SimulatedKfd::report_memory_fault(uint32_t vmid, uint64_t addr, uint32_t gp
   // may not have would send the runtime after the wrong problem. It does not
   // set `imprecise` either -- that reports an inexact faulting address, which
   // is not what is uncertain here.
-  fault.not_present = cause == amdgpu::MemoryFaultCause::NotPresent;
-  fault.read_only = cause == amdgpu::MemoryFaultCause::ReadOnly;
+  fault.not_present = cause == kmd::MemoryFaultCause::NotPresent;
+  fault.read_only = cause == kmd::MemoryFaultCause::ReadOnly;
 
   // Reporting is best effort by design: a process that never created a
   // memory-exception event has no channel for this, exactly as on hardware,
@@ -854,8 +864,8 @@ void SimulatedKfd::set_process_client_pid(uint32_t process_id, pid_t client_pid)
   if (it != processes_.end()) {
     it->second->set_client_pid(client_pid);
     for (auto &g : gpus_) {
-      if (auto *mem = g.soc ? g.soc->memory() : nullptr)
-        mem->set_process_client_pid(process_id, client_pid);
+      if (g.backend)
+        g.backend->set_process_client_pid(process_id, client_pid);
     }
   }
 }
@@ -889,15 +899,14 @@ uint32_t SimulatedKfd::open_process(pid_t client_pid) {
     if (client_pid > 0)
       proc->set_client_pid(client_pid);
     proc->event_state_.reset();
-    for (auto &g : gpus_) {
-      if (auto *mem = g.soc ? g.soc->memory() : nullptr) {
-        mem->register_process(pid, &proc->page_table_, &proc->page_table_mutex_,
-                              proc->page_table_generation(), proc->page_table_request_mutex());
-        mem->set_memory_fault_reporter(fault_reporter_for(g));
-        if (client_pid > 0)
-          mem->set_process_client_pid(pid, client_pid);
-      }
+    const int result = register_device_process(*proc, false);
+    if (result < 0) {
+      errno = -result;
+      return 0;
     }
+    if (client_pid > 0)
+      for (auto &gpu : gpus_)
+        gpu.backend->set_process_client_pid(pid, client_pid);
     processes_[pid] = proc;
 
     {
@@ -913,8 +922,8 @@ uint32_t SimulatedKfd::open_process(pid_t client_pid) {
     auto session = debug_sessions_.find(client_pid);
     if (session != debug_sessions_.end() && session->second.target_mem_fd.get() >= 0) {
       for (auto &g : gpus_)
-        if (auto *mem = g.soc ? g.soc->memory() : nullptr)
-          mem->set_process_mem_fd(pid, session->second.target_mem_fd.get());
+        if (g.backend)
+          g.backend->set_process_mem_fd(pid, session->second.target_mem_fd.get());
     }
   }
 
@@ -1104,8 +1113,8 @@ int SimulatedKfd::close(uint32_t process_id) {
   }
 
   for (auto &g : gpus_) {
-    if (auto *mem = g.soc ? g.soc->memory() : nullptr)
-      mem->unregister_process(process_id);
+    if (g.backend)
+      g.backend->unregister_process(process_id);
   }
 
   const bool trace_enabled = vm_trace_enabled();
@@ -3593,8 +3602,8 @@ void SimulatedKfd::release_debuggee_state(pid_t target_pid, KfdProcess *target_p
 
 void SimulatedKfd::revoke_target_mem_routing(uint32_t process_id) {
   for (auto &g : gpus_)
-    if (auto *mem = g.soc ? g.soc->memory() : nullptr)
-      mem->set_process_mem_fd(process_id, -1);
+    if (g.backend)
+      g.backend->set_process_mem_fd(process_id, -1);
 }
 
 void SimulatedKfd::release_debug_checks_if_last_session() {
@@ -4605,8 +4614,9 @@ int SimulatedKfd::debug_trap_ioctl(KfdProcess &caller, void *arg, int *target_me
     auto [inserted, _] = debug_sessions_.emplace(target_pid, std::move(sess));
     if (target_proc != nullptr && inserted->second.target_mem_fd) {
       for (auto &g : gpus_)
-        if (auto *mem = g.soc ? g.soc->memory() : nullptr)
-          mem->set_process_mem_fd(target_proc->process_id(), inserted->second.target_mem_fd.get());
+        if (g.backend)
+          g.backend->set_process_mem_fd(target_proc->process_id(),
+                                        inserted->second.target_mem_fd.get());
     }
     set_debug_active_on_all_cus(true);
     debug_sessions_cv_.notify_one();

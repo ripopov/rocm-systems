@@ -13,6 +13,11 @@ namespace kmd {
 class SimdojoDeviceBackend final : public DeviceBackend {
 public:
   explicit SimdojoDeviceBackend(SoC &soc) : soc_(soc) {}
+  void set_memory_fault_reporter(MemoryFaultReporter *reporter) override;
+  int register_process(KfdProcess &process, bool passthrough) override;
+  void unregister_process(uint32_t process) override;
+  void set_process_client_pid(uint32_t process, int32_t client_pid) override;
+  void set_process_mem_fd(uint32_t process, int fd) override;
   std::optional<uint32_t> queue_xcc(uint32_t ordinal) const override;
   int create_queue(const QueueDescriptor &queue) override;
   void update_queue(uint32_t process, uint32_t queue, uint64_t ring, uint32_t size,
