@@ -39,6 +39,11 @@ target_include_directories(
     INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external_headers/drm_headers
 )
 
+if(RJ_KMD_SERVER_ONLY)
+    add_subdirectory(src/rocjitsu/kmd)
+    return()
+endif()
+
 add_subdirectory(src/rocjitsu/code/analysis)
 add_subdirectory(src/rocjitsu/code)
 add_subdirectory(src/rocjitsu/isa)
