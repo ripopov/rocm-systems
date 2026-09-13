@@ -32,15 +32,29 @@ public:
   uint64_t size = 0;
 };
 
+struct DeviceMapping {
+  uint32_t process_id;
+  uint64_t allocation_id;
+  uint64_t gpu_va;
+  uint64_t device_address;
+  uint64_t size;
+  uint8_t memory_type;
+};
+
 /// Optional backend-owned storage. Without this capability, common KFD uses
 /// host memory as upstream's in-process simulator does. An allocation failure
 /// never falls back to host storage when a backend provides this capability.
-class DeviceAllocator {
+class DeviceMemory {
 public:
-  virtual ~DeviceAllocator() = default;
+  virtual ~DeviceMemory() = default;
   /// Return zero with a lease, or negative errno without retained resources.
   virtual int allocate(const DeviceAllocationRequest &request,
                        std::shared_ptr<DeviceAllocation> &allocation) = 0;
+  /// Map/reconfigure a complete allocation atomically. A negative errno leaves
+  /// the previous mapping unchanged. KFD retains its allocation lease until
+  /// unmap succeeds or unregister_process has quiesced all process mappings.
+  virtual int map(const DeviceMapping &mapping) = 0;
+  virtual int unmap(uint32_t process, uint64_t gpu_va, uint64_t size) = 0;
 };
 
 } // namespace rocjitsu::kmd

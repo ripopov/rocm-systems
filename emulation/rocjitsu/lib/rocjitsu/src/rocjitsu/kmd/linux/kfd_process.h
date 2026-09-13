@@ -109,6 +109,7 @@ public:
     int memfd = -1;
     uint64_t memfd_offset = 0;
     std::shared_ptr<kmd::DeviceAllocation> device_allocation;
+    std::unordered_set<uint32_t> mapped_gpu_ids;
     uint32_t gpu_id = 0;
     bool user_va = false;
     bool imported = false;

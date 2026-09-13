@@ -106,7 +106,7 @@ public:
   virtual ~DeviceBackend() = default;
   /// Null means debugger execution is unsupported, not a successful no-op.
   virtual DeviceDebugger *debugger() { return nullptr; }
-  virtual DeviceAllocator *allocator() { return nullptr; }
+  virtual DeviceMemory *memory() { return nullptr; }
   virtual rj_code_arch_t architecture() const = 0;
   virtual void configure(const DeviceApertures &apertures, uint32_t scratch_wave_divisor,
                          const DeviceCallbacks &callbacks) = 0;
@@ -115,6 +115,8 @@ public:
   /// A negative errno leaves no device-side process state. Passthrough is only
   /// valid when the application and device execute in the same host process.
   virtual int register_process(KfdProcess &process, bool passthrough) = 0;
+  /// Stop all process accesses and remove remaining device mappings before
+  /// returning. Allocation leases can survive this process through KFD IPC.
   virtual void unregister_process(uint32_t process) = 0;
   virtual void set_process_client_pid(uint32_t process, int32_t client_pid) = 0;
   /// Borrow a debugger-authorized /proc/pid/mem descriptor; -1 revokes it.

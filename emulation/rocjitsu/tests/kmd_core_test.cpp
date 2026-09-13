@@ -11,6 +11,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <map>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -25,9 +26,10 @@ public:
   int registration_result = 0;
   int queue_result = 0;
   int live_processes = 0;
-  rocjitsu::kmd::DeviceAllocator *memory_allocator = nullptr;
+  rocjitsu::kmd::DeviceMemory *memory_allocator = nullptr;
   std::vector<std::string> *lifecycle = nullptr;
-  rocjitsu::kmd::DeviceAllocator *allocator() override { return memory_allocator; }
+  std::function<void(uint32_t)> on_unregister;
+  rocjitsu::kmd::DeviceMemory *memory() override { return memory_allocator; }
   rj_code_arch_t architecture() const override { return ROCJITSU_CODE_ARCH_CDNA4; }
   void configure(const rocjitsu::kmd::DeviceApertures &, uint32_t,
                  const rocjitsu::kmd::DeviceCallbacks &) override {}
@@ -37,9 +39,11 @@ public:
       ++live_processes;
     return registration_result;
   }
-  void unregister_process(uint32_t) override {
+  void unregister_process(uint32_t process) override {
     if (lifecycle)
       lifecycle->push_back("unregister");
+    if (on_unregister)
+      on_unregister(process);
     --live_processes;
   }
   void set_process_client_pid(uint32_t, int32_t) override {}
@@ -56,17 +60,21 @@ public:
   void write64(uint32_t, uint64_t, uint64_t) override {}
 };
 
-class TestDeviceAllocator : public rocjitsu::kmd::DeviceAllocator {
+class TestDeviceMemory : public rocjitsu::kmd::DeviceMemory {
 public:
   struct State {
     int live = 0;
     int released = 0;
     std::vector<std::string> lifecycle;
+    std::map<std::pair<uint32_t, uint64_t>, rocjitsu::kmd::DeviceMapping> mappings;
   };
   struct Lease : rocjitsu::kmd::DeviceAllocation {
     std::shared_ptr<State> state;
     explicit Lease(std::shared_ptr<State> state) : state(std::move(state)) { ++this->state->live; }
     ~Lease() override {
+      EXPECT_TRUE(
+          std::none_of(state->mappings.begin(), state->mappings.end(),
+                       [&](const auto &entry) { return entry.second.allocation_id == id; }));
       if (fd >= 0)
         ::close(fd);
       --state->live;
@@ -77,6 +85,24 @@ public:
   std::shared_ptr<State> state = std::make_shared<State>();
   int result = 0;
   bool invalid_range = false;
+  int map_result = 0;
+  int unmap_result = 0;
+  int map_calls = 0;
+  int unmap_calls = 0;
+  int map(const rocjitsu::kmd::DeviceMapping &mapping) override {
+    ++map_calls;
+    if (map_result != 0)
+      return map_result;
+    state->mappings[{mapping.process_id, mapping.gpu_va}] = mapping;
+    return 0;
+  }
+  int unmap(uint32_t process, uint64_t va, uint64_t) override {
+    ++unmap_calls;
+    if (unmap_result != 0)
+      return unmap_result;
+    state->mappings.erase({process, va});
+    return 0;
+  }
   rocjitsu::kmd::DeviceAllocationRequest last_request{};
   int allocate(const rocjitsu::kmd::DeviceAllocationRequest &request,
                std::shared_ptr<rocjitsu::kmd::DeviceAllocation> &out) override {
@@ -99,7 +125,7 @@ public:
 };
 
 TEST(KmdCoreTest, BackendAllocationFailureDoesNotFallBackOrPublishHandles) {
-  TestDeviceAllocator allocator;
+  TestDeviceMemory allocator;
   auto backend = std::make_unique<TestDeviceBackend>();
   backend->memory_allocator = &allocator;
   std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
@@ -133,7 +159,7 @@ TEST(KmdCoreTest, BackendAllocationFailureDoesNotFallBackOrPublishHandles) {
 }
 
 TEST(KmdCoreTest, BackendAllocationLeaseLivesUntilLastIpcImportIsFreed) {
-  TestDeviceAllocator allocator;
+  TestDeviceMemory allocator;
   auto backend = std::make_unique<TestDeviceBackend>();
   backend->memory_allocator = &allocator;
   std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
@@ -183,10 +209,14 @@ TEST(KmdCoreTest, BackendAllocationLeaseLivesUntilLastIpcImportIsFreed) {
 }
 
 TEST(KmdCoreTest, ShutdownStopsQueuesBeforeReleasingBackendBacking) {
-  TestDeviceAllocator allocator;
+  TestDeviceMemory allocator;
   auto backend = std::make_unique<TestDeviceBackend>();
   backend->memory_allocator = &allocator;
   backend->lifecycle = &allocator.state->lifecycle;
+  backend->on_unregister = [&](uint32_t process) {
+    std::erase_if(allocator.state->mappings,
+                  [&](const auto &entry) { return entry.first.first == process; });
+  };
   std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
   devices.push_back({7, std::move(backend)});
   rocjitsu::SimulatedKfd driver(std::move(devices));
@@ -197,13 +227,130 @@ TEST(KmdCoreTest, ShutdownStopsQueuesBeforeReleasingBackendBacking) {
   allocation.size = 4096;
   allocation.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
   ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
+  uint32_t gpu_id = 7;
+  kfd_ioctl_map_memory_to_gpu_args mapping{};
+  mapping.handle = allocation.handle;
+  mapping.device_ids_array_ptr = reinterpret_cast<uint64_t>(&gpu_id);
+  mapping.n_devices = 1;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_MAP_MEMORY_TO_GPU, &mapping), 0);
+  ASSERT_EQ(allocator.state->mappings.size(), 1);
   kfd_ioctl_create_queue_args queue{};
   queue.gpu_id = 7;
   queue.queue_type = KFD_IOC_QUEUE_TYPE_COMPUTE_AQL;
   ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_CREATE_QUEUE, &queue), 0);
   ASSERT_EQ(driver.close(pid), 0);
   EXPECT_EQ(allocator.state->lifecycle,
-            (std::vector<std::string>{"destroy_queue", "release", "unregister"}));
+            (std::vector<std::string>{"destroy_queue", "unregister", "release"}));
+}
+
+TEST(KmdCoreTest, DeviceMappingFailuresRetainBackingUntilUnmapSucceeds) {
+  TestDeviceMemory memory;
+  auto backend = std::make_unique<TestDeviceBackend>();
+  backend->memory_allocator = &memory;
+  backend->on_unregister = [&](uint32_t process) {
+    std::erase_if(memory.state->mappings,
+                  [&](const auto &entry) { return entry.first.first == process; });
+  };
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(backend)});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  ASSERT_NE(pid, 0);
+  kfd_ioctl_alloc_memory_of_gpu_args allocation{};
+  allocation.gpu_id = 7;
+  allocation.size = 4096;
+  allocation.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
+  auto process = driver.find_process(pid);
+  uint32_t gpu_id = 7;
+  kfd_ioctl_map_memory_to_gpu_args mapping{};
+  mapping.handle = allocation.handle;
+  mapping.n_devices = 1;
+  mapping.device_ids_array_ptr = reinterpret_cast<uint64_t>(&gpu_id);
+  memory.map_result = -ENOMEM;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_MAP_MEMORY_TO_GPU, &mapping), -ENOMEM);
+  EXPECT_EQ(mapping.n_success, 0);
+  EXPECT_TRUE(process->allocations_.at(allocation.handle).mapped_gpu_ids.empty());
+  memory.map_result = 0;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_MAP_MEMORY_TO_GPU, &mapping), 0);
+  EXPECT_EQ(mapping.n_success, 1);
+  const auto &installed = memory.state->mappings.at({pid, allocation.va_addr});
+  EXPECT_EQ(installed.allocation_id, 77);
+  EXPECT_EQ(installed.device_address, 0x80000000);
+  EXPECT_EQ(installed.size, 4096);
+  kfd_ioctl_unmap_memory_from_gpu_args unmapping{};
+  unmapping.handle = allocation.handle;
+  unmapping.n_devices = 1;
+  unmapping.device_ids_array_ptr = reinterpret_cast<uint64_t>(&gpu_id);
+  memory.unmap_result = -EBUSY;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU, &unmapping), -EBUSY);
+  EXPECT_EQ(unmapping.n_success, 0);
+  kfd_ioctl_free_memory_of_gpu_args free_args{};
+  free_args.handle = allocation.handle;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), -EBUSY);
+  EXPECT_EQ(memory.state->live, 1);
+  EXPECT_TRUE(process->allocations_.contains(allocation.handle));
+  EXPECT_EQ(memory.state->mappings.size(), 1);
+  memory.unmap_result = 0;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU, &unmapping), 0);
+  EXPECT_EQ(unmapping.n_success, 1);
+  EXPECT_EQ(memory.state->live, 1);
+  EXPECT_TRUE(memory.state->mappings.empty());
+  mapping.n_success = 0;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_MAP_MEMORY_TO_GPU, &mapping), 0);
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), 0);
+  EXPECT_EQ(memory.state->live, 0);
+  EXPECT_EQ(memory.state->released, 1);
+  EXPECT_TRUE(memory.state->mappings.empty());
+  EXPECT_EQ(driver.close(pid), 0);
+}
+
+TEST(KmdCoreTest, DeviceMappingReportsCompletedPrefixAndResumesRetry) {
+  TestDeviceMemory first_memory;
+  TestDeviceMemory second_memory;
+  auto first = std::make_unique<TestDeviceBackend>();
+  auto second = std::make_unique<TestDeviceBackend>();
+  first->memory_allocator = &first_memory;
+  second->memory_allocator = &second_memory;
+  first->on_unregister = [&](uint32_t process) {
+    std::erase_if(first_memory.state->mappings,
+                  [&](const auto &entry) { return entry.first.first == process; });
+  };
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(first)});
+  devices.push_back({8, std::move(second)});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  ASSERT_NE(pid, 0);
+  kfd_ioctl_alloc_memory_of_gpu_args allocation{};
+  allocation.gpu_id = 7;
+  allocation.size = 4096;
+  allocation.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
+  uint32_t ids[] = {7, 8};
+  kfd_ioctl_map_memory_to_gpu_args mapping{};
+  mapping.handle = allocation.handle;
+  mapping.n_devices = 2;
+  mapping.device_ids_array_ptr = reinterpret_cast<uint64_t>(ids);
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_MAP_MEMORY_TO_GPU, &mapping), -EXDEV);
+  EXPECT_EQ(mapping.n_success, 1);
+  EXPECT_EQ(first_memory.map_calls, 1);
+  EXPECT_EQ(second_memory.map_calls, 0);
+  EXPECT_EQ(first_memory.state->mappings.size(), 1);
+  // The successful prefix is not submitted again on retry.
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_MAP_MEMORY_TO_GPU, &mapping), -EXDEV);
+  EXPECT_EQ(mapping.n_success, 1);
+  EXPECT_EQ(first_memory.map_calls, 1);
+  kfd_ioctl_unmap_memory_from_gpu_args unmapping{};
+  unmapping.handle = allocation.handle;
+  unmapping.n_devices = 2;
+  unmapping.device_ids_array_ptr = reinterpret_cast<uint64_t>(ids);
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU, &unmapping), 0);
+  EXPECT_EQ(unmapping.n_success, 2);
+  EXPECT_EQ(first_memory.unmap_calls, 1);
+  EXPECT_EQ(second_memory.unmap_calls, 0);
+  EXPECT_TRUE(first_memory.state->mappings.empty());
+  EXPECT_EQ(driver.close(pid), 0);
 }
 
 TEST(KmdCoreTest, DeviceRegistrationFailureRollsBackEarlierDevices) {
