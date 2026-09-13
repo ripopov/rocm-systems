@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -107,6 +108,7 @@ public:
     uint64_t memfd_offset = 0;
     std::shared_ptr<kmd::DeviceAllocation> device_allocation;
     std::unordered_set<uint32_t> mapped_gpu_ids;
+    std::optional<amdgpu::Mtype> memory_type_override;
     uint32_t gpu_id = 0;
     bool user_va = false;
     bool imported = false;

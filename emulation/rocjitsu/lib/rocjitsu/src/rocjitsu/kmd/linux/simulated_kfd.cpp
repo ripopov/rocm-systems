@@ -1733,7 +1733,8 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
                       bool(flags & MAP_FIXED), alloc.user_va, alloc.memfd);
   });
 
-  map_to_gpu(proc, alloc.gpu_va, host_ptr, length, pte_mtype_for_flags(alloc.flags));
+  map_to_gpu(proc, alloc.gpu_va, host_ptr, length,
+             alloc.memory_type_override.value_or(pte_mtype_for_flags(alloc.flags)));
 
   return host_ptr;
 }
@@ -2299,10 +2300,13 @@ int SimulatedKfd::map_memory_ioctl(KfdProcess &proc, void *arg) {
       if (!memory || !source || memory != source->backend->memory())
         return -EXDEV;
       const auto &storage = *alloc.device_allocation;
-      const kmd::DeviceMapping mapping{
-          proc.process_id(), storage.id,
-          alloc.gpu_va,      storage.device_address,
-          alloc.size,        static_cast<uint8_t>(pte_mtype_for_flags(alloc.flags))};
+      const kmd::DeviceMapping mapping{proc.process_id(),
+                                       storage.id,
+                                       alloc.gpu_va,
+                                       storage.device_address,
+                                       alloc.size,
+                                       static_cast<uint8_t>(alloc.memory_type_override.value_or(
+                                           pte_mtype_for_flags(alloc.flags)))};
       // Reserve bookkeeping before programming the device: allocation failure
       // in the container must not leave an untracked live GPU mapping.
       const auto [tracked, newly_tracked] = alloc.mapped_gpu_ids.insert(id);
@@ -2320,7 +2324,8 @@ int SimulatedKfd::map_memory_ioctl(KfdProcess &proc, void *arg) {
     return -ENOTSUP;
   }
   if (alloc.host_ptr)
-    map_to_gpu(proc, alloc.gpu_va, alloc.host_ptr, alloc.size, pte_mtype_for_flags(alloc.flags));
+    map_to_gpu(proc, alloc.gpu_va, alloc.host_ptr, alloc.size,
+               alloc.memory_type_override.value_or(pte_mtype_for_flags(alloc.flags)));
   args->n_success = args->n_devices;
   return 0;
 }
@@ -2726,6 +2731,22 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
     // the local GPU sees writes from the importing GPU.  On real hardware
     // xGMI snoops handle this; in the simulator CC forces L2 invalidate
     // before every refetch, emulating the cross-GPU coherence protocol.
+    if (alloc.device_allocation && !alloc.mapped_gpu_ids.empty()) {
+      // MAP_MEMORY rejects cross-provider peers, so one atomic reconfiguration
+      // updates this allocation's device mapping. Do it before publishing an
+      // IPC handle or changing KFD's cache-policy record.
+      auto *device = find_gpu(alloc.gpu_id);
+      if (!device || !device->backend || !device->backend->memory())
+        return -EIO;
+      const auto &storage = *alloc.device_allocation;
+      const kmd::DeviceMapping mapping{proc.process_id(), storage.id,
+                                       alloc.gpu_va,      storage.device_address,
+                                       alloc.size,        static_cast<uint8_t>(amdgpu::Mtype::CC)};
+      const int result = device->backend->memory()->map(mapping);
+      if (result != 0)
+        return result < 0 ? result : -EIO;
+    }
+    alloc.memory_type_override = amdgpu::Mtype::CC;
     proc.set_page_mtype(alloc.gpu_va, alloc.size, amdgpu::Mtype::CC);
 
     alloc_size = alloc.size;
@@ -2842,6 +2863,7 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc.memfd = dup_fd;
     alloc.memfd_offset = backing_offset;
     alloc.device_allocation = std::move(device_allocation);
+    alloc.memory_type_override = amdgpu::Mtype::CC;
     alloc.gpu_id = source_gpu_id;
     alloc.imported = true;
     proc.allocations_[handle] = alloc;
