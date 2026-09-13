@@ -197,7 +197,7 @@ typedef struct rj_kmd_queue_update {
   uint32_t queue_id;
   uint64_t ring_base_va;
   uint32_t ring_size;
-  uint32_t reserved;
+  uint32_t queue_percentage;
 } rj_kmd_queue_update_t;
 
 typedef struct rj_kmd_queue_key {

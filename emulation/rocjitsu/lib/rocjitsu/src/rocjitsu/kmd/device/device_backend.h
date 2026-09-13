@@ -126,7 +126,9 @@ public:
   /// Return zero on installation, or a negative errno with no retained queue
   /// resources or references to the borrowed mappings.
   virtual int create_queue(const QueueDescriptor &queue) = 0;
-  virtual void update_queue(uint32_t process, uint32_t queue, uint64_t ring, uint32_t size,
+  /// Return zero after updating the queue, or negative errno with its previous
+  /// configuration intact. KFD publishes the new snapshot only after success.
+  virtual int update_queue(uint32_t process, uint32_t queue, uint64_t ring, uint32_t size,
                             uint32_t percentage) = 0;
   virtual void destroy_queue(uint32_t process, uint32_t queue) = 0;
   virtual void set_doorbell_base(uint32_t process, void *base) = 0;
