@@ -31,6 +31,16 @@ struct DeviceCallbacks {
   std::function<bool(uint32_t process, uint64_t address, size_t size)> allocate_scratch;
 };
 
+/// Optional device execution support for KFD debugger sessions. Session
+/// authorization and event bookkeeping remain in the common KFD implementation.
+class DeviceDebugger {
+public:
+  virtual ~DeviceDebugger() = default;
+  virtual void set_active(bool active) = 0;
+  virtual void release_queue(uint32_t process, uint32_t queue) = 0;
+  virtual bool signal_queue_exception(uint32_t process, uint32_t queue, uint64_t mask) = 0;
+};
+
 /// @brief A queue programmed by KFD, independent of the execution engine.
 struct QueueDescriptor {
   uint32_t process_id = 0;
@@ -57,6 +67,8 @@ struct QueueDescriptor {
 class DeviceBackend {
 public:
   virtual ~DeviceBackend() = default;
+  /// Null means debugger execution is unsupported, not a successful no-op.
+  virtual DeviceDebugger *debugger() { return nullptr; }
   virtual rj_code_arch_t architecture() const = 0;
   virtual void configure(const DeviceApertures &apertures, uint32_t scratch_wave_divisor,
                          const DeviceCallbacks &callbacks) = 0;

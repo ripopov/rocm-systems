@@ -10,9 +10,10 @@ namespace rocjitsu {
 class SoC;
 namespace kmd {
 
-class SimdojoDeviceBackend final : public DeviceBackend {
+class SimdojoDeviceBackend final : public DeviceBackend, private DeviceDebugger {
 public:
   explicit SimdojoDeviceBackend(SoC &soc) : soc_(soc) {}
+  DeviceDebugger *debugger() override { return this; }
   rj_code_arch_t architecture() const override;
   void configure(const DeviceApertures &apertures, uint32_t scratch_wave_divisor,
                  const DeviceCallbacks &callbacks) override;
@@ -31,6 +32,9 @@ public:
   void write64(uint32_t process, uint64_t address, uint64_t value) override;
 
 private:
+  void set_active(bool active) override;
+  void release_queue(uint32_t process, uint32_t queue) override;
+  bool signal_queue_exception(uint32_t process, uint32_t queue, uint64_t mask) override;
   SoC &soc_;
 };
 
