@@ -49,6 +49,7 @@ struct IpcHandleKeyHash {
 struct IpcObject {
   uint32_t share_handle[4];
   int backing_memfd = -1;
+  uint64_t backing_offset = 0;
   uint64_t allocation_size = 0;
   uint32_t allocation_flags = 0;
   uint32_t source_gpu_id = 0;
@@ -164,7 +165,9 @@ public:
   /// WAIT_EVENTS unblock and their jthread joins can complete.
   void close_all_processes();
 
-  [[nodiscard]] int get_mmap_memfd(uint32_t process_id, off_t offset) const;
+  [[nodiscard]] int get_mmap_memfd(uint32_t process_id, off_t offset,
+                                   uint64_t *backing_offset = nullptr,
+                                   uint64_t *backing_size = nullptr) const;
   /// @}
 
   /// @brief Local-mode get_mmap_memfd (uses local process).
@@ -324,7 +327,8 @@ private:
   void *dispatch_mmap(KfdProcess &proc, void *addr, size_t length, int prot, int flags,
                       off_t offset);
   int dispatch_munmap(KfdProcess &proc, void *addr, size_t length);
-  int dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const;
+  int dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset, uint64_t *backing_offset,
+                              uint64_t *backing_size) const;
 
   int get_process_apertures_ioctl(void *arg) override;
   int acquire_vm_ioctl(void *arg) override;

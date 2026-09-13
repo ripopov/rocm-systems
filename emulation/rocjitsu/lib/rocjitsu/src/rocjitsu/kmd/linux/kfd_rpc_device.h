@@ -21,7 +21,7 @@ public:
   rj_status_t drm_path(const char **path) override;
   rj_status_t map(uint32_t process, rj_vm_map_t *request) override;
   rj_status_t unmap(uint32_t process, rj_vm_unmap_t *request) override;
-  rj_status_t shared_mem(uint32_t process, uint64_t offset, rj_handle_t *handle) override;
+  rj_status_t shared_mem(uint32_t process, uint64_t offset, rj_handle_t *handle);
   rj_status_t execute(uint32_t process, rj_vm_cmd_t *request) override;
   void close_all() override;
 

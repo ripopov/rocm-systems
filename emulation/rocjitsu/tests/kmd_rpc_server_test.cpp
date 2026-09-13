@@ -58,9 +58,6 @@ public:
   }
   rj_status_t map(uint32_t, rj_vm_map_t *) override { return ROCJITSU_STATUS_UNSUPPORTED; }
   rj_status_t unmap(uint32_t, rj_vm_unmap_t *) override { return ROCJITSU_STATUS_UNSUPPORTED; }
-  rj_status_t shared_mem(uint32_t, uint64_t, rj_handle_t *) override {
-    return ROCJITSU_STATUS_UNSUPPORTED;
-  }
   rj_status_t execute(uint32_t, rj_vm_cmd_t *request) override {
     std::unique_lock lock(mutex);
     entered = true;

@@ -29,7 +29,6 @@ public:
   virtual rj_status_t drm_path(const char **path) = 0;
   virtual rj_status_t map(uint32_t process, rj_vm_map_t *request) = 0;
   virtual rj_status_t unmap(uint32_t process, rj_vm_unmap_t *request) = 0;
-  virtual rj_status_t shared_mem(uint32_t process, uint64_t offset, rj_handle_t *handle) = 0;
   virtual rj_status_t execute(uint32_t process, rj_vm_cmd_t *request) = 0;
   virtual void close_all() = 0;
   virtual void transport_failed() { close_all(); }

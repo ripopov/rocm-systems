@@ -343,6 +343,7 @@ private:
       return RequestDisposition::Disconnect;
 
     rj_vm_map_t map{};
+    map.shared_handle = -1;
     map.addr = request.addr;
     map.length = request.length;
     map.prot = static_cast<uint32_t>(request.prot);
@@ -356,16 +357,13 @@ private:
     response.request_id = header.request_id;
     response.result = reinterpret_cast<void *>(map.mapped_addr) == MAP_FAILED ? -map.map_errno : 0;
     response.payload_bytes = sizeof(RpcMmapResponse);
-    RpcMmapResponse map_response{.mapped_addr = map.mapped_addr};
+    RpcMmapResponse map_response{.mapped_addr = map.mapped_addr,
+                                 .backing = {map.shared_offset, map.shared_size}};
     uint8_t response_buffer[sizeof(response) + sizeof(map_response)];
     std::memcpy(response_buffer, &response, sizeof(response));
     std::memcpy(response_buffer + sizeof(response), &map_response, sizeof(map_response));
 
-    rj_handle_t backing_memory = -1;
-    if (daemon_->device->shared_mem(process_id_, request.offset, &backing_memory) !=
-        ROCJITSU_STATUS_SUCCESS) {
-      return RequestDisposition::Disconnect;
-    }
+    rj_handle_t backing_memory = map.shared_handle;
     const bool sent = backing_memory >= 0
                           ? send_with_fd_exact(client_fd_, response_buffer, sizeof(response_buffer),
                                                backing_memory)
@@ -436,10 +434,16 @@ private:
 
     bool sent = false;
     if (command.shared_handle >= 0) {
-      std::vector<uint8_t> response_buffer(sizeof(response) + command.buf_size);
+      if (command.buf_size > kMaxPayloadBytes - sizeof(RpcSharedBacking))
+        return RequestDisposition::Disconnect;
+      response.payload_bytes += sizeof(RpcSharedBacking);
+      const RpcSharedBacking backing{command.shared_offset, command.shared_size};
+      std::vector<uint8_t> response_buffer(sizeof(response) + response.payload_bytes);
       std::memcpy(response_buffer.data(), &response, sizeof(response));
+      std::memcpy(response_buffer.data() + sizeof(response), &backing, sizeof(backing));
       if (command.buf_size > 0) {
-        std::memcpy(response_buffer.data() + sizeof(response), command.buf, command.buf_size);
+        std::memcpy(response_buffer.data() + sizeof(response) + sizeof(backing), command.buf,
+                    command.buf_size);
       }
       sent = send_with_fd_exact(client_fd_, response_buffer.data(), response_buffer.size(),
                                 command.shared_handle);

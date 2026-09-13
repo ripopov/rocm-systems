@@ -100,6 +100,7 @@ public:
     uint32_t flags = 0;
     uint64_t handle = 0;
     int memfd = -1;
+    uint64_t memfd_offset = 0;
     uint32_t gpu_id = 0;
     bool user_va = false;
     bool imported = false;

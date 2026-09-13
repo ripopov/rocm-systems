@@ -141,17 +141,21 @@ rj_status_t execute_kmd_command(SimulatedKfd *driver, uint32_t process_id, rj_vm
   cmd->result =
       driver->ioctl(process_id, cmd->cmd, cmd->buf, &cmd->in_mem_handle, cmd->in_proc_handle);
   cmd->shared_handle = -1;
+  cmd->shared_offset = 0;
+  cmd->shared_size = 0;
   if (adopting_notifier && cmd->result == 0)
     cmd->in_handle = -1;
 
   if (cmd->cmd == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU && cmd->result == 0) {
     auto *alloc_args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(cmd->buf);
     cmd->shared_handle =
-        driver->get_mmap_memfd(process_id, static_cast<off_t>(alloc_args->mmap_offset));
+        driver->get_mmap_memfd(process_id, static_cast<off_t>(alloc_args->mmap_offset),
+                               &cmd->shared_offset, &cmd->shared_size);
   } else if (cmd->cmd == AMDKFD_IOC_IPC_IMPORT_HANDLE && cmd->result == 0) {
     auto *import_args = static_cast<kfd_ioctl_ipc_import_handle_args *>(cmd->buf);
     cmd->shared_handle =
-        driver->get_mmap_memfd(process_id, static_cast<off_t>(import_args->mmap_offset));
+        driver->get_mmap_memfd(process_id, static_cast<off_t>(import_args->mmap_offset),
+                               &cmd->shared_offset, &cmd->shared_size);
   }
 
   return ROCJITSU_STATUS_SUCCESS;

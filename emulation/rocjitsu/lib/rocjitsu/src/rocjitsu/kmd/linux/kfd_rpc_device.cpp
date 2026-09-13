@@ -118,6 +118,8 @@ rj_status_t KfdRpcDevice::map(uint32_t process, rj_vm_map_t *request) {
   // Capture errno before any other call can overwrite the mapping failure.
   request->map_errno = mapped == MAP_FAILED ? errno : 0;
   request->mapped_addr = reinterpret_cast<uint64_t>(mapped);
+  request->shared_handle = driver_.get_mmap_memfd(process, static_cast<off_t>(request->offset),
+                                                  &request->shared_offset, &request->shared_size);
   return ROCJITSU_STATUS_SUCCESS;
 }
 
