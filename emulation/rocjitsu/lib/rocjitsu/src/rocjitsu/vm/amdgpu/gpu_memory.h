@@ -1447,7 +1447,12 @@ private:
     return true;
   }
 
+  // AArch64's low 48-bit user range includes addresses above the x86-64 split.
+#if defined(__aarch64__)
+  static constexpr uint64_t kUserSpaceLimit = 0x1000000000000ULL;
+#else
   static constexpr uint64_t kUserSpaceLimit = 0x800000000000ULL;
+#endif
 
   /// @brief A passthrough page, reachable only through a checked operation.
   ///
