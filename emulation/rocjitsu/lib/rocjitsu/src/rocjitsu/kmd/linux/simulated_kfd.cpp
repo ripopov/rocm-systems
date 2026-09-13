@@ -2,25 +2,18 @@
 // SPDX-License-Identifier: MIT
 
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
-#include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/amdgpu_properties.h"
 #include "rocjitsu/kmd/linux/cwsr.h"
 #include "rocjitsu/kmd/linux/host_mapping_lock.h"
 #include "rocjitsu/kmd/linux/kfd_ioctl_utils.h"
 #include "rocjitsu/kmd/linux/kfd_topology.h"
 #include "rocjitsu/kmd/linux/libc_passthrough.h"
-#include "rocjitsu/vm/amdgpu/command_processor.h"
-#include "rocjitsu/vm/amdgpu/compute_unit.h"
-#include "rocjitsu/vm/amdgpu/gpu_memory.h"
-#include "rocjitsu/vm/amdgpu/hwreg.h"
-#include "rocjitsu/vm/amdgpu/wavefront.h"
 
 #include "rocjitsu/base/rj_compiler.h"
 RJ_DIAGNOSTIC_PUSH
 RJ_DIAGNOSTIC_IGNORE_PEDANTIC
 #include "hsa/amd_hsa_queue.h"
 RJ_DIAGNOSTIC_POP
-#include "rocjitsu/vm/amdgpu/xcd.h"
 #include "util/except.h"
 #include "util/log.h"
 
@@ -416,35 +409,6 @@ void SimulatedKfd::setup_topology(const config::KfdDeviceConfig &dev, uint32_t n
   setup_topology(gpu_info_from_config(dev, num_xcc));
 }
 
-SimulatedKfd::SimulatedKfd(SoC &soc, bool daemon_mode,
-                           DebugIdentityValidationHook debug_identity_validation_hook)
-    : daemon_mode_(daemon_mode),
-      debug_identity_validation_hook_(std::move(debug_identity_validation_hook)),
-      debug_session_reaper_([this](std::stop_token stop) { reap_exited_debug_sessions(stop); }) {
-  // Resolve the real libc entry points once, up front and single-threaded, so no
-  // passthrough call site ever triggers a first-time dlsym under a per-process
-  // lock. Idempotent: a no-op if the interposer already resolved the table.
-  libc_passthrough().resolve();
-  GpuDevice device;
-  device.soc = &soc;
-  device.backend = std::make_unique<kmd::SimdojoDeviceBackend>(soc);
-  gpus_.push_back(std::move(device));
-}
-
-SimulatedKfd::SimulatedKfd(std::vector<SoC *> socs, std::vector<uint32_t> gpu_ids, bool daemon_mode,
-                           DebugIdentityValidationHook debug_identity_validation_hook)
-    : daemon_mode_(daemon_mode),
-      debug_identity_validation_hook_(std::move(debug_identity_validation_hook)),
-      debug_session_reaper_([this](std::stop_token stop) { reap_exited_debug_sessions(stop); }) {
-  libc_passthrough().resolve();
-  for (size_t i = 0; i < socs.size(); ++i) {
-    GpuDevice device;
-    device.soc = socs[i];
-    device.backend = std::make_unique<kmd::SimdojoDeviceBackend>(*socs[i]);
-    device.gpu_id = i < gpu_ids.size() ? gpu_ids[i] : socs[i]->gpu_id();
-    gpus_.push_back(std::move(device));
-  }
-}
 
 SimulatedKfd::SimulatedKfd(std::vector<BackendDevice> devices, bool daemon_mode,
                            DebugIdentityValidationHook debug_identity_validation_hook)
@@ -738,36 +702,33 @@ void SimulatedKfd::init_command_processors_locked() {
     callbacks.allocate_scratch = [this](uint32_t process_id, uint64_t gpu_va, size_t size) -> bool {
       return allocate_scratch_backing(process_id, gpu_va, size);
     };
+    callbacks.trap_handler = [this, i](uint32_t process) {
+      return resolve_trap_handler(process, static_cast<uint32_t>(i));
+    };
+    callbacks.trap_complete = [this](uint32_t process, uint32_t queue) {
+      on_queue_trap_complete(process, queue);
+    };
+    callbacks.doorbell_id = [this](uint32_t process, uint32_t queue) {
+      return queue_doorbell_id(process, queue);
+    };
+    callbacks.process_exists = [this](uint32_t process) { return find_process(process) != nullptr; };
+    callbacks.single_step = [this](uint32_t process, uint32_t queue,
+                                    const std::function<void(bool)> &stop) {
+      return on_queue_single_step_complete(process, queue, stop);
+    };
+    callbacks.watchpoint = [this](uint32_t process, uint32_t queue, uint64_t address,
+                                  uint32_t bytes, bool is_write, bool is_atomic,
+                                  const kmd::DeviceCallbacks::Stop &stop,
+                                  const kmd::DeviceCallbacks::Rollback &rollback) {
+      return on_queue_watchpoint(process, queue, address, bytes, is_write, is_atomic, stop, rollback);
+    };
+    callbacks.debug_exception = [this](uint32_t process, uint32_t queue, uint64_t mask,
+                                       const kmd::DeviceCallbacks::Stop &stop,
+                                       const kmd::DeviceCallbacks::Rollback &rollback) {
+      return on_queue_exception(process, queue, mask, stop, rollback);
+    };
     g.backend->configure({ap.lds_base, ap.lds_limit, ap.scratch_base, ap.scratch_limit},
                          scratch_wave_divisor, callbacks);
-    if (g.soc)
-      g.soc->for_each_cp([this, i](amdgpu::CommandProcessor *cp) {
-        for (auto *cu : cp->compute_units()) {
-          const uint32_t gpu_ordinal = static_cast<uint32_t>(i);
-          cu->set_trap_handler_resolver([this, gpu_ordinal](const amdgpu::Wavefront &wf) {
-            return resolve_trap_handler(wf, gpu_ordinal);
-          });
-          cu->set_sendmsg_handler([this](amdgpu::Wavefront &wf, uint32_t message) {
-            return on_wave_sendmsg(wf, message);
-          });
-          cu->set_trap_completion_handler(
-              [this](amdgpu::Wavefront &wf) { on_wave_trap_complete(wf); });
-          cu->set_single_step_handler(
-              [this](amdgpu::Wavefront &wf) { return on_wave_single_step_complete(wf); });
-          cu->set_watchpoint_handler([this](amdgpu::Wavefront &wf, uint64_t address, uint32_t bytes,
-                                            bool is_write, bool is_atomic) {
-            return on_wave_watchpoint(wf, address, bytes, is_write, is_atomic);
-          });
-          cu->set_illegal_inst_handler(
-              [this](amdgpu::Wavefront &wf) { return on_wave_illegal_instruction(wf); });
-          cu->set_alu_exception_handler(
-              [this](amdgpu::Wavefront &wf) { return on_wave_alu_exception(wf); });
-          cu->set_memory_violation_handler(
-              [this](amdgpu::Wavefront &wf, uint64_t address, bool is_write) {
-                return on_wave_memory_violation(wf, address, is_write);
-              });
-        }
-      });
     g.cps_initialized = true;
   }
 }
@@ -2947,9 +2908,7 @@ bool SimulatedKfd::serialize_queue_debug_waves(uint32_t process_id, uint32_t que
   return true;
 }
 
-void SimulatedKfd::on_wave_trap_complete(amdgpu::Wavefront &wave) {
-  const uint32_t process_id = wave.process_id();
-  const uint32_t queue_id = wave.queue_id();
+void SimulatedKfd::on_queue_trap_complete(uint32_t process_id, uint32_t queue_id) {
   auto proc = find_process(process_id);
   if (!proc)
     return;
@@ -2988,14 +2947,14 @@ void SimulatedKfd::on_wave_trap_complete(amdgpu::Wavefront &wave) {
   notify_debug_event(proc, queue_id, gpu_id);
 }
 
-std::optional<amdgpu::ComputeUnitCore::TrapHandlerConfig>
-SimulatedKfd::resolve_trap_handler(const amdgpu::Wavefront &wave, uint32_t gpu_ordinal) {
+std::optional<kmd::DeviceTrapHandler>
+SimulatedKfd::resolve_trap_handler(uint32_t process_id, uint32_t gpu_ordinal) {
   std::shared_ptr<KfdProcess> proc;
   uint64_t tba = 0;
   uint64_t tma = 0;
   {
     std::lock_guard<std::mutex> lk(process_mutex_);
-    auto proc_it = processes_.find(wave.process_id());
+    auto proc_it = processes_.find(process_id);
     if (proc_it == processes_.end() || gpu_ordinal >= proc_it->second->gpu_state_.size())
       return std::nullopt;
     proc = proc_it->second;
@@ -3017,36 +2976,18 @@ SimulatedKfd::resolve_trap_handler(const amdgpu::Wavefront &wave, uint32_t gpu_o
   if (debug_enabled && gpu_ordinal < gpus_.size() &&
       !debug_stop_publishable(gpus_[gpu_ordinal].gpu_id))
     debug_enabled = false;
-  return amdgpu::ComputeUnitCore::TrapHandlerConfig{tba, tma, debug_enabled};
+  return kmd::DeviceTrapHandler{tba, tma, debug_enabled};
 }
 
-bool SimulatedKfd::on_wave_sendmsg(amdgpu::Wavefront &wave, uint32_t message) {
-  constexpr uint32_t kMessageIdMask = 0xFu;
-  constexpr uint32_t kMessageInterrupt = 1;
-  constexpr uint32_t kMessageGetDoorbell = 10;
-  const uint32_t message_id = message & kMessageIdMask;
-
-  auto proc = find_process(wave.process_id());
+std::optional<uint32_t> SimulatedKfd::queue_doorbell_id(uint32_t process_id, uint32_t queue_id) {
+  auto proc = find_process(process_id);
   if (!proc)
-    return false;
-
-  if (message_id == kMessageGetDoorbell) {
-    std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
-    auto doorbell = proc->queue_doorbell_map_.find(wave.queue_id());
-    if (doorbell == proc->queue_doorbell_map_.end())
-      return false;
-    const uint32_t doorbell_id = (doorbell->second.doorbell_offset / sizeof(uint64_t)) & 0x3FFu;
-    // The handler sets EXEC_LO[31] before issuing MSG_GET_DOORBELL and polls
-    // until hardware clears it. Return the 10-bit ID with the pending bit clear.
-    wave.set_exec((wave.exec() & 0xFFFFFFFF00000000ULL) | doorbell_id);
-    return true;
-  }
-
-  if (message_id != kMessageInterrupt || !wave.in_trap_handler())
-    return false;
-
-  // CWSR publication is deferred until s_rfe applies the handler's STATUS.HALT.
-  return true;
+    return std::nullopt;
+  std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
+  auto doorbell = proc->queue_doorbell_map_.find(queue_id);
+  if (doorbell == proc->queue_doorbell_map_.end())
+    return std::nullopt;
+  return (doorbell->second.doorbell_offset / sizeof(uint64_t)) & 0x3FFu;
 }
 
 bool SimulatedKfd::debug_stop_publishable(uint32_t gpu_id) {
@@ -3113,15 +3054,16 @@ void SimulatedKfd::notify_debug_event(const std::shared_ptr<KfdProcess> &proc, u
   }
 }
 
-bool SimulatedKfd::on_wave_single_step_complete(amdgpu::Wavefront &wave) {
-  auto proc = find_process(wave.process_id());
+bool SimulatedKfd::on_queue_single_step_complete(uint32_t process_id, uint32_t queue_id,
+    const std::function<void(bool)> &stop) {
+  auto proc = find_process(process_id);
   if (!proc)
     return false;
   uint64_t ctx_base = 0;
   uint32_t gpu_id = 0;
   {
     std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
-    auto queue = proc->queue_snapshot_map_.find(wave.queue_id());
+    auto queue = proc->queue_snapshot_map_.find(queue_id);
     if (queue == proc->queue_snapshot_map_.end())
       return false;
     ctx_base = queue->second.ctx_save_restore_address;
@@ -3133,15 +3075,10 @@ bool SimulatedKfd::on_wave_single_step_complete(amdgpu::Wavefront &wave) {
     // Clear single-step even while declining. The compute unit discards this
     // callback's result and re-enters it for as long as the flag is set, so
     // returning false without clearing it spins on every instruction.
-    wave.set_debug_single_step(false);
+    stop(false);
     return false;
   }
-  wave.set_debug_single_step(false);
-  wave.debug_trap(0);
-  // gfx9.4 reports completed single-step through TRAPSTS.TRAP_AFTER_INST. This
-  // is the public stop-reason bit rocm-dbgapi consumes before the next resume.
-  constexpr uint32_t kTrapAfterInstMask = 1u << 25;
-  wave.set_trapsts(wave.trapsts() | kTrapAfterInstMask);
+  stop(true);
   // Single-step completion is wave-specific. Report it even if another wave
   // in the queue is running; rocm-dbgapi will suspend the queue before reading
   // its CWSR state. Deferring until every peer stops can lose the event forever
@@ -3150,13 +3087,14 @@ bool SimulatedKfd::on_wave_single_step_complete(amdgpu::Wavefront &wave) {
   // queue. The debugger's ensuing SUSPEND_QUEUES request publishes one stable,
   // authoritative CWSR snapshot instead of redundantly serializing every
   // resident wave here first.
-  notify_debug_event(proc, wave.queue_id(), gpu_id);
+  notify_debug_event(proc, queue_id, gpu_id);
   return true;
 }
 
-bool SimulatedKfd::on_wave_watchpoint(amdgpu::Wavefront &wave, uint64_t address, uint32_t bytes,
-                                      bool is_write, bool is_atomic) {
-  auto proc = find_process(wave.process_id());
+bool SimulatedKfd::on_queue_watchpoint(uint32_t process_id, uint32_t queue_id,
+    uint64_t address, uint32_t bytes, bool is_write, bool is_atomic,
+    const kmd::DeviceCallbacks::Stop &stop, const kmd::DeviceCallbacks::Rollback &rollback) {
+  auto proc = find_process(process_id);
   if (!proc)
     return false;
   uint32_t matched_slots = 0;
@@ -3190,7 +3128,7 @@ bool SimulatedKfd::on_wave_watchpoint(amdgpu::Wavefront &wave, uint64_t address,
   uint32_t gpu_id = 0;
   {
     std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
-    auto queue = proc->queue_snapshot_map_.find(wave.queue_id());
+    auto queue = proc->queue_snapshot_map_.find(queue_id);
     if (queue == proc->queue_snapshot_map_.end())
       return false;
     ctx_base = queue->second.ctx_save_restore_address;
@@ -3202,30 +3140,18 @@ bool SimulatedKfd::on_wave_watchpoint(amdgpu::Wavefront &wave, uint64_t address,
   if (!debug_stop_publishable(gpu_id))
     return false;
 
-  static constexpr uint32_t kTrapstsBits[] = {1u << 7, 1u << 12, 1u << 13, 1u << 14};
-  const auto saved = wave.debug_stop_state();
-  uint32_t trapsts = wave.trapsts();
-  for (uint32_t slot = 0; slot < KfdProcess::DebugSession::kMaxAddressWatches; ++slot)
-    if ((matched_slots & (uint32_t{1} << slot)) != 0)
-      trapsts |= kTrapstsBits[slot];
-  wave.set_trapsts(trapsts);
-  if (wave.uses_separate_trap_ctrl()) {
-    constexpr uint32_t kTrapCtrlAddrWatch = 1u << 7;
-    wave.set_gfx12_trap_ctrl_raw(wave.gfx12_trap_ctrl_raw() | kTrapCtrlAddrWatch);
-  } else {
-    constexpr uint32_t kModeExcpEnAddrWatch = 1u << 19;
-    wave.set_mode_raw(wave.mode_raw() | kModeExcpEnAddrWatch);
-  }
-  wave.debug_trap(0);
-  if (!report_wave_stopped(proc, wave.queue_id(), gpu_id, ctx_base, ctx_size)) {
-    wave.restore_debug_stop_state(saved);
+  stop(matched_slots);
+  if (!report_wave_stopped(proc, queue_id, gpu_id, ctx_base, ctx_size)) {
+    rollback();
     return false;
   }
   return true;
 }
 
-bool SimulatedKfd::on_wave_illegal_instruction(amdgpu::Wavefront &wave) {
-  auto proc = find_process(wave.process_id());
+bool SimulatedKfd::on_queue_exception(uint32_t process_id, uint32_t queue_id,
+    uint64_t exception_mask, const kmd::DeviceCallbacks::Stop &stop,
+    const kmd::DeviceCallbacks::Rollback &rollback) {
+  auto proc = find_process(process_id);
   if (!proc)
     return false;
   {
@@ -3239,7 +3165,7 @@ bool SimulatedKfd::on_wave_illegal_instruction(amdgpu::Wavefront &wave) {
   uint32_t gpu_id = 0;
   {
     std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
-    auto queue = proc->queue_snapshot_map_.find(wave.queue_id());
+    auto queue = proc->queue_snapshot_map_.find(queue_id);
     if (queue == proc->queue_snapshot_map_.end())
       return false;
     ctx_base = queue->second.ctx_save_restore_address;
@@ -3250,89 +3176,9 @@ bool SimulatedKfd::on_wave_illegal_instruction(amdgpu::Wavefront &wave) {
     return false;
   if (!debug_stop_publishable(gpu_id))
     return false;
-  constexpr uint32_t kTrapstsIllegalInst = 1u << 11;
-  const auto saved = wave.debug_stop_state();
-  wave.set_trapsts(wave.trapsts() | kTrapstsIllegalInst);
-  wave.set_fatal_exception_pending(true);
-  wave.debug_trap(0);
-  if (!report_wave_stopped(proc, wave.queue_id(), gpu_id, ctx_base, ctx_size,
-                           KFD_EC_MASK(EC_QUEUE_WAVE_ILLEGAL_INSTRUCTION))) {
-    wave.restore_debug_stop_state(saved);
-    return false;
-  }
-  return true;
-}
-
-bool SimulatedKfd::on_wave_memory_violation(amdgpu::Wavefront &wave, uint64_t, bool) {
-  auto proc = find_process(wave.process_id());
-  if (!proc)
-    return false;
-  {
-    std::lock_guard<std::mutex> lk(debug_sessions_mutex_);
-    auto session = debug_sessions_.find(proc->client_pid());
-    if (session == debug_sessions_.end() || !session->second.enabled)
-      return false;
-  }
-  uint64_t ctx_base = 0;
-  uint32_t ctx_size = 0;
-  uint32_t gpu_id = 0;
-  {
-    std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
-    auto queue = proc->queue_snapshot_map_.find(wave.queue_id());
-    if (queue == proc->queue_snapshot_map_.end())
-      return false;
-    ctx_base = queue->second.ctx_save_restore_address;
-    ctx_size = queue->second.ctx_save_restore_area_size;
-    gpu_id = queue->second.gpu_id;
-  }
-  if (ctx_base == 0)
-    return false;
-  if (!debug_stop_publishable(gpu_id))
-    return false;
-  constexpr uint32_t kTrapstsXnackError = 1u << 28;
-  const auto saved = wave.debug_stop_state();
-  wave.set_trapsts(wave.trapsts() | kTrapstsXnackError);
-  wave.debug_trap(0);
-  if (!report_wave_stopped(proc, wave.queue_id(), gpu_id, ctx_base, ctx_size,
-                           KFD_EC_MASK(EC_QUEUE_WAVE_MEMORY_VIOLATION))) {
-    wave.restore_debug_stop_state(saved);
-    return false;
-  }
-  return true;
-}
-
-bool SimulatedKfd::on_wave_alu_exception(amdgpu::Wavefront &wave) {
-  auto proc = find_process(wave.process_id());
-  if (!proc)
-    return false;
-  {
-    std::lock_guard<std::mutex> lk(debug_sessions_mutex_);
-    auto session = debug_sessions_.find(proc->client_pid());
-    if (session == debug_sessions_.end() || !session->second.enabled)
-      return false;
-  }
-  uint64_t ctx_base = 0;
-  uint32_t ctx_size = 0;
-  uint32_t gpu_id = 0;
-  {
-    std::lock_guard<std::mutex> lk(proc->alloc_mutex_);
-    auto queue = proc->queue_snapshot_map_.find(wave.queue_id());
-    if (queue == proc->queue_snapshot_map_.end())
-      return false;
-    ctx_base = queue->second.ctx_save_restore_address;
-    ctx_size = queue->second.ctx_save_restore_area_size;
-    gpu_id = queue->second.gpu_id;
-  }
-  if (ctx_base == 0)
-    return false;
-  if (!debug_stop_publishable(gpu_id))
-    return false;
-  const auto saved = wave.debug_stop_state();
-  wave.set_fatal_exception_pending(true);
-  wave.debug_trap(0);
-  if (!report_wave_stopped(proc, wave.queue_id(), gpu_id, ctx_base, ctx_size,
-                           KFD_EC_MASK(EC_QUEUE_WAVE_MATH_ERROR))) {
-    wave.restore_debug_stop_state(saved);
+  stop(0);
+  if (!report_wave_stopped(proc, queue_id, gpu_id, ctx_base, ctx_size, exception_mask)) {
+    rollback();
     return false;
   }
   return true;

@@ -5,14 +5,11 @@
 #define ROCJITSU_KMD_LINUX_SIMULATED_KFD_H_
 
 #include "rocjitsu/base/rj_compiler.h"
-#include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/config/kfd_device_config.h"
 #include "rocjitsu/kmd/device/device_backend.h"
 #include "rocjitsu/kmd/linux/kfd_process.h"
 #include "rocjitsu/kmd/linux/linux_kfd.h"
 #include "rocjitsu/kmd/linux/sysfs.h"
-#include "rocjitsu/vm/soc.h"
-
-#include "simdojo/sim/simulation.h"
 
 RJ_DIAGNOSTIC_PUSH
 RJ_DIAGNOSTIC_IGNORE_PEDANTIC
@@ -31,13 +28,7 @@ RJ_DIAGNOSTIC_POP
 
 namespace rocjitsu {
 
-namespace amdgpu {
-class Wavefront;
-}
-
-namespace kmd {
-struct CwsrWaveState;
-}
+class SoC;
 /// @brief 128-bit IPC share handle key, matching the kernel's random handle.
 struct IpcHandleKey {
   uint32_t words[4];
@@ -279,7 +270,6 @@ public:
 
   /// @brief Per-GPU device state (mirrors kfd_dev in the kernel).
   struct GpuDevice {
-    SoC *soc = nullptr;
     std::unique_ptr<kmd::DeviceBackend> backend;
     uint32_t gpu_id = 0;
     /// Fault reporter bound to this device, so a violation names its own GPU.
@@ -381,12 +371,13 @@ private:
   ///        that is already exiting, so parking it there parks the client.
   void runtime_debugger_handshake(pid_t target_pid, bool enabling);
 
-  std::optional<amdgpu::ComputeUnitCore::TrapHandlerConfig>
-  resolve_trap_handler(const amdgpu::Wavefront &wf, uint32_t gpu_ordinal);
-  bool on_wave_sendmsg(amdgpu::Wavefront &wf, uint32_t message);
-  void on_wave_trap_complete(amdgpu::Wavefront &wf);
+  std::optional<kmd::DeviceTrapHandler> resolve_trap_handler(uint32_t process_id,
+                                                          uint32_t gpu_ordinal);
+  std::optional<uint32_t> queue_doorbell_id(uint32_t process_id, uint32_t queue_id);
+  void on_queue_trap_complete(uint32_t process_id, uint32_t queue_id);
 
-  bool on_wave_single_step_complete(amdgpu::Wavefront &wf);
+  bool on_queue_single_step_complete(uint32_t process, uint32_t queue,
+                                     const std::function<void(bool)> &stop);
   void notify_debug_event(const std::shared_ptr<KfdProcess> &proc, uint32_t queue_id,
                           uint32_t gpu_id,
                           uint64_t exception_mask = KFD_EC_MASK(EC_QUEUE_WAVE_TRAP));
@@ -418,10 +409,9 @@ private:
   /// if the wave was stopped. @param addr post-translation global address;
   /// @param bytes access width; @param is_write store/atomic; @param is_atomic
   /// atomic read-modify-write.
-  bool on_wave_watchpoint(amdgpu::Wavefront &wf, uint64_t addr, uint32_t bytes, bool is_write,
-                          bool is_atomic);
-  bool on_wave_illegal_instruction(amdgpu::Wavefront &wf);
-  bool on_wave_alu_exception(amdgpu::Wavefront &wf);
+  bool on_queue_watchpoint(uint32_t process, uint32_t queue, uint64_t addr, uint32_t bytes,
+                           bool is_write, bool is_atomic, const kmd::DeviceCallbacks::Stop &stop,
+                           const kmd::DeviceCallbacks::Rollback &rollback);
 
   /// @brief Memory-violation handler installed on every compute unit.
   /// @details Runs on the engine thread for a global-memory access to an
@@ -429,7 +419,9 @@ private:
   /// TRAPSTS.xnack_error, stops the wave, and reports an
   /// EC_QUEUE_WAVE_MEMORY_VIOLATION exception (rocm-dbgapi
   /// WAVE_STOP_REASON_MEMORY_VIOLATION); returns true, else false.
-  bool on_wave_memory_violation(amdgpu::Wavefront &wf, uint64_t addr, bool is_write);
+  bool on_queue_exception(uint32_t process, uint32_t queue, uint64_t exception_mask,
+                          const kmd::DeviceCallbacks::Stop &stop,
+                          const kmd::DeviceCallbacks::Rollback &rollback);
 
   /// @brief Toggle per-access debugger checks on every compute unit.
   void set_debug_active_on_all_cus(bool active);

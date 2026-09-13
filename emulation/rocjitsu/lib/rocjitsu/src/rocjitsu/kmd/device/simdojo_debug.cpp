@@ -12,6 +12,12 @@
 #include "rocjitsu/vm/soc.h"
 #include "util/log.h"
 
+#include "rocjitsu/base/rj_compiler.h"
+RJ_DIAGNOSTIC_PUSH
+RJ_DIAGNOSTIC_IGNORE_PEDANTIC
+#include "linux/uapi/kfd_ioctl.h"
+RJ_DIAGNOSTIC_POP
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -553,6 +559,72 @@ void kmd::SimdojoDeviceBackend::clear_completed_queue(const DebugQueueContext &c
         memory->write32(area_base + offset, 0, process_id);
     }
   }
+}
+
+void kmd::SimdojoDeviceBackend::configure_debug_callbacks(const DeviceCallbacks &callbacks) {
+  soc_.for_each_cp([&](amdgpu::CommandProcessor *cp) {
+    for (auto *cu : cp->compute_units()) {
+      cu->set_single_step_handler([step = callbacks.single_step](amdgpu::Wavefront &wave) {
+        if (!step)
+          return false;
+        return step(wave.process_id(), wave.queue_id(), [&](bool publishable) {
+          wave.set_debug_single_step(false);
+          if (publishable) {
+            wave.debug_trap(0);
+            // TRAPSTS.TRAP_AFTER_INST is the debugger's single-step reason.
+            wave.set_trapsts(wave.trapsts() | (1u << 25));
+          }
+        });
+      });
+      cu->set_watchpoint_handler([watch = callbacks.watchpoint](amdgpu::Wavefront &wave,
+                                                                uint64_t address, uint32_t bytes,
+                                                                bool is_write, bool is_atomic) {
+        if (!watch)
+          return false;
+        const auto saved = wave.debug_stop_state();
+        return watch(
+            wave.process_id(), wave.queue_id(), address, bytes, is_write, is_atomic,
+            [&](uint32_t slots) {
+              static constexpr uint32_t trapsts_bits[] = {1u << 7, 1u << 12, 1u << 13, 1u << 14};
+              uint32_t trapsts = wave.trapsts();
+              for (uint32_t slot = 0; slot < std::size(trapsts_bits); ++slot)
+                if ((slots & (uint32_t{1} << slot)) != 0)
+                  trapsts |= trapsts_bits[slot];
+              wave.set_trapsts(trapsts);
+              if (wave.uses_separate_trap_ctrl())
+                wave.set_gfx12_trap_ctrl_raw(wave.gfx12_trap_ctrl_raw() | (1u << 7));
+              else
+                wave.set_mode_raw(wave.mode_raw() | (1u << 19));
+              wave.debug_trap(0);
+            },
+            [&] { wave.restore_debug_stop_state(saved); });
+      });
+      auto exception = [report = callbacks.debug_exception](amdgpu::Wavefront &wave, uint64_t mask,
+                                                            uint32_t trapsts, bool fatal) {
+        if (!report)
+          return false;
+        const auto saved = wave.debug_stop_state();
+        return report(
+            wave.process_id(), wave.queue_id(), mask,
+            [&](uint32_t) {
+              wave.set_trapsts(wave.trapsts() | trapsts);
+              if (fatal)
+                wave.set_fatal_exception_pending(true);
+              wave.debug_trap(0);
+            },
+            [&] { wave.restore_debug_stop_state(saved); });
+      };
+      cu->set_illegal_inst_handler([exception](amdgpu::Wavefront &wave) {
+        return exception(wave, KFD_EC_MASK(EC_QUEUE_WAVE_ILLEGAL_INSTRUCTION), 1u << 11, true);
+      });
+      cu->set_alu_exception_handler([exception](amdgpu::Wavefront &wave) {
+        return exception(wave, KFD_EC_MASK(EC_QUEUE_WAVE_MATH_ERROR), 0, true);
+      });
+      cu->set_memory_violation_handler([exception](amdgpu::Wavefront &wave, uint64_t, bool) {
+        return exception(wave, KFD_EC_MASK(EC_QUEUE_WAVE_MEMORY_VIOLATION), 1u << 28, false);
+      });
+    }
+  });
 }
 
 } // namespace rocjitsu
