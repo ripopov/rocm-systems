@@ -74,7 +74,46 @@ void SimdojoDeviceBackend::configure(const DeviceApertures &apertures,
     cp->set_interrupt_callback(callbacks.interrupt);
     cp->set_scratch_backing_resolver(callbacks.scratch_backing);
     cp->set_scratch_backing_allocator(callbacks.allocate_scratch);
+    for (auto *cu : cp->compute_units()) {
+      cu->set_trap_handler_resolver(
+          [resolve = callbacks.trap_handler](const amdgpu::Wavefront &wave)
+              -> std::optional<amdgpu::ComputeUnitCore::TrapHandlerConfig> {
+            if (!resolve)
+              return std::nullopt;
+            const auto handler = resolve(wave.process_id());
+            if (!handler)
+              return std::nullopt;
+            return amdgpu::ComputeUnitCore::TrapHandlerConfig{handler->tba, handler->tma,
+                                                              handler->debug_enabled};
+          });
+      cu->set_trap_completion_handler(
+          [complete = callbacks.trap_complete](amdgpu::Wavefront &wave) {
+            if (complete)
+              complete(wave.process_id(), wave.queue_id());
+          });
+      cu->set_sendmsg_handler([doorbell = callbacks.doorbell_id, exists = callbacks.process_exists](
+                                  amdgpu::Wavefront &wave, uint32_t message) {
+        constexpr uint32_t kMessageIdMask = 0xFu;
+        constexpr uint32_t kMessageInterrupt = 1;
+        constexpr uint32_t kMessageGetDoorbell = 10;
+        if (!exists || !exists(wave.process_id()))
+          return false;
+        const uint32_t message_id = message & kMessageIdMask;
+        if (message_id == kMessageGetDoorbell) {
+          const auto id = doorbell ? doorbell(wave.process_id(), wave.queue_id()) : std::nullopt;
+          if (!id)
+            return false;
+          // Clear EXEC_LO[31], which the handler polls while waiting for
+          // MSG_GET_DOORBELL, and preserve EXEC_HI.
+          wave.set_exec((wave.exec() & 0xFFFFFFFF00000000ULL) | *id);
+          return true;
+        }
+        // CWSR publication waits for s_rfe to apply STATUS.HALT.
+        return message_id == kMessageInterrupt && wave.in_trap_handler();
+      });
+    }
   });
+  configure_debug_callbacks(callbacks);
 }
 
 void SimdojoDeviceBackend::set_memory_fault_reporter(MemoryFaultReporter *reporter) {

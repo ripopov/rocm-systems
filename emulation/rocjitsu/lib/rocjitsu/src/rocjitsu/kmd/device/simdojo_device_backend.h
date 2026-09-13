@@ -32,6 +32,7 @@ public:
   void write64(uint32_t process, uint64_t address, uint64_t value) override;
 
 private:
+  void configure_debug_callbacks(const DeviceCallbacks &callbacks);
   void set_active(bool active) override;
   void release_queue(uint32_t process, uint32_t queue) override;
   bool signal_queue_exception(uint32_t process, uint32_t queue, uint64_t mask) override;

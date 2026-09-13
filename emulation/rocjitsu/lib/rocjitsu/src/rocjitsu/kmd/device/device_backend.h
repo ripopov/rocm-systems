@@ -25,10 +25,28 @@ struct DeviceApertures {
 
 /// Device execution reports events and requests scratch backing from KFD.
 /// Callbacks must run without locks that KFD's device calls also acquire.
+struct DeviceTrapHandler {
+  uint64_t tba;
+  uint64_t tma;
+  bool debug_enabled;
+};
+
 struct DeviceCallbacks {
+  using Stop = std::function<void(uint32_t matched_watch_slots)>;
+  using Rollback = std::function<void()>;
   std::function<void(uint32_t process, uint32_t event)> interrupt;
   std::function<uint64_t(uint32_t process)> scratch_backing;
   std::function<bool(uint32_t process, uint64_t address, size_t size)> allocate_scratch;
+  std::function<std::optional<DeviceTrapHandler>(uint32_t process)> trap_handler;
+  std::function<void(uint32_t process, uint32_t queue)> trap_complete;
+  std::function<std::optional<uint32_t>(uint32_t process, uint32_t queue)> doorbell_id;
+  std::function<bool(uint32_t process)> process_exists;
+  /// Stop and rollback callbacks are synchronous and must not be retained.
+  std::function<bool(uint32_t, uint32_t, uint64_t, const Stop &, const Rollback &)> debug_exception;
+  std::function<bool(uint32_t, uint32_t, uint64_t, uint32_t, bool, bool, const Stop &,
+                     const Rollback &)>
+      watchpoint;
+  std::function<bool(uint32_t, uint32_t, const std::function<void(bool)> &)> single_step;
 };
 
 /// Optional device execution support for KFD debugger sessions. Session
