@@ -1457,8 +1457,13 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
     if (mapped != MAP_FAILED)
       syscall(SYS_madvise, mapped, length, MADV_POPULATE_WRITE);
 
-    if (memfd >= 0 && memfd != mapping_memfd)
+    // The mapping owns a kernel reference to the backing file. The descriptor
+    // received with this reply is temporary, unlike the borrowed allocation
+    // descriptor in handle_memfds_, and must be closed even when mmap fails.
+    const int mapping_errno = errno;
+    if (memfd >= 0)
       syscall(SYS_close, memfd);
+    errno = mapping_errno;
     return mapped;
   }
 

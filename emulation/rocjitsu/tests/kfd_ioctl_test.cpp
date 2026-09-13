@@ -4132,6 +4132,73 @@ TEST(RemoteDriverDbgEnableTest, FailedEnableLeavesCallerRuntimeInfoUntouched) {
   server.join();
 }
 
+// SCM_RIGHTS creates a new descriptor for each mmap reply. It is not the
+// allocation's cached descriptor: the client must release it after mapping,
+// including failures, while the mapping itself keeps the file alive.
+void check_mmap_reply_descriptor_lifetime(bool local_failure, int daemon_result) {
+  int sv[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+  const CloseOnScopeExit server_closer{sv[1]};
+  rocjitsu::RemoteDriver rd(sv[0]);
+  int backing = static_cast<int>(::syscall(SYS_memfd_create, "mmap_reply_lifetime", MFD_CLOEXEC));
+  ASSERT_GE(backing, 0);
+  const CloseOnScopeExit backing_closer{backing};
+  ASSERT_EQ(::ftruncate(backing, 4096), 0);
+  const uint64_t marker = 0x123456789abcdef0ULL;
+  ASSERT_EQ(::pwrite(backing, &marker, sizeof(marker), 0), sizeof(marker));
+
+  // With no worker threads, the next received descriptor occupies this slot.
+  int next_fd = ::fcntl(backing, F_DUPFD_CLOEXEC, 0);
+  ASSERT_GE(next_fd, 0);
+  ASSERT_EQ(::close(next_fd), 0);
+  for (unsigned iteration = 0; iteration < 8; ++iteration) {
+    SCOPED_TRACE(iteration);
+    rocjitsu::RpcHeader reply{};
+    reply.opcode = rocjitsu::RPC_MMAP;
+    reply.payload_bytes = sizeof(rocjitsu::RpcMmapResponse);
+    reply.result = daemon_result;
+    rocjitsu::RpcMmapResponse body{};
+    std::array<uint8_t, sizeof(reply) + sizeof(body)> bytes{};
+    std::memcpy(bytes.data(), &reply, sizeof(reply));
+    std::memcpy(bytes.data() + sizeof(reply), &body, sizeof(body));
+    ASSERT_EQ(rocjitsu::rpc_send_msg(sv[1], bytes.data(), bytes.size(), &backing, 1),
+              static_cast<ssize_t>(bytes.size()));
+
+    void *mapped =
+        rd.mmap(nullptr, local_failure ? 0 : 4096, PROT_READ | PROT_WRITE, MAP_SHARED, 0);
+    int map_errno = errno;
+    if (local_failure || daemon_result != 0) {
+      EXPECT_EQ(mapped, MAP_FAILED);
+      EXPECT_EQ(map_errno, daemon_result != 0 ? -daemon_result : EINVAL);
+    } else {
+      ASSERT_NE(mapped, MAP_FAILED);
+      EXPECT_EQ(*static_cast<uint64_t *>(mapped), marker);
+      ASSERT_EQ(::munmap(mapped, 4096), 0);
+    }
+    int slot_state = ::fcntl(next_fd, F_GETFD);
+    EXPECT_EQ(slot_state, -1) << "mmap retained the SCM_RIGHTS descriptor";
+    EXPECT_EQ(errno, EBADF);
+    if (slot_state >= 0)
+      ::close(next_fd);
+    EXPECT_GE(::fcntl(backing, F_GETFD), 0) << "the sender's backing must remain owned";
+
+    std::array<uint8_t, sizeof(rocjitsu::RpcHeader) + sizeof(rocjitsu::RpcMmapRequest)> request;
+    ASSERT_TRUE(rocjitsu::rpc_recv_exact(sv[1], request.data(), request.size()));
+  }
+}
+
+TEST(RemoteDriverBackingTest, SuccessfulMmapReleasesReplyDescriptor) {
+  check_mmap_reply_descriptor_lifetime(false, 0);
+}
+
+TEST(RemoteDriverBackingTest, FailedLocalMmapReleasesReplyDescriptor) {
+  check_mmap_reply_descriptor_lifetime(true, 0);
+}
+
+TEST(RemoteDriverBackingTest, FailedDaemonMmapReleasesReplyDescriptor) {
+  check_mmap_reply_descriptor_lifetime(false, -ENOMEM);
+}
+
 // --- RemoteDriver RPC stream poisoning ---
 //
 // Every exchange on the socket is length-framed, so a request that stops
