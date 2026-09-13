@@ -37,6 +37,7 @@ namespace rocjitsu {
 struct KmdRpcState {
   std::atomic<rj_daemon_status_t> status{RJ_DAEMON_STATUS_STARTING};
   std::atomic<bool> stop_requested{false};
+  std::atomic<bool> accepting_stopped{false};
   KmdRpcDevice *device = nullptr;
   int listen_fd = -1;
   std::string socket_path;
@@ -478,7 +479,8 @@ void accept_clients(KmdRpcState *daemon, std::stop_token stop) {
   };
   std::vector<ClientThread> client_threads;
   try {
-    while (!stop.stop_requested() && !daemon->stop_requested.load(std::memory_order_acquire)) {
+    while (!stop.stop_requested() && !daemon->stop_requested.load(std::memory_order_acquire) &&
+           !daemon->accepting_stopped.load(std::memory_order_acquire)) {
       std::erase_if(client_threads, [](const ClientThread &client) {
         return client.complete->load(std::memory_order_acquire);
       });
@@ -492,6 +494,13 @@ void accept_clients(KmdRpcState *daemon, std::stop_token stop) {
 
       {
         std::lock_guard lock(daemon->clients_mutex);
+        // Serialize admission with stop_accepting(): a connection returned by
+        // accept4 concurrently with listener shutdown must not become a client.
+        if (daemon->accepting_stopped.load(std::memory_order_acquire) ||
+            daemon->stop_requested.load(std::memory_order_acquire)) {
+          ::close(client_fd);
+          break;
+        }
         daemon->client_fds.push_back(client_fd);
       }
       try {
@@ -515,17 +524,15 @@ void accept_clients(KmdRpcState *daemon, std::stop_token stop) {
     mark_error(daemon);
   }
 
-  if (!daemon->stop_requested.load(std::memory_order_acquire))
+  if (!daemon->stop_requested.load(std::memory_order_acquire) &&
+      !daemon->accepting_stopped.load(std::memory_order_acquire))
     mark_error(daemon);
 
+  // Explicit joins do not request cancellation like jthread destruction does.
+  // A quiesced listener leaves sessions alive; stop()/fail() interrupt sockets
+  // and wake device waits when the owner eventually requests full shutdown.
   for (auto &client : client_threads)
-    client.thread.request_stop();
-  {
-    std::lock_guard lock(daemon->clients_mutex);
-    for (int fd : daemon->client_fds)
-      ::shutdown(fd, SHUT_RDWR);
-  }
-  client_threads.clear();
+    client.thread.join();
 }
 
 void remove_owned_socket(const KmdRpcState *daemon) {
@@ -641,6 +648,7 @@ rj_status_t KmdRpcServer::bind(const char *path) {
 
 rj_status_t KmdRpcServer::start() {
   if (state_->listen_fd < 0 || state_->accept_thread.joinable() ||
+      state_->accepting_stopped.load() ||
       state_->status.load() != RJ_DAEMON_STATUS_STARTING)
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
   state_->accept_thread =
@@ -649,6 +657,13 @@ rj_status_t KmdRpcServer::start() {
   return state_->status.compare_exchange_strong(expected, RJ_DAEMON_STATUS_RUNNING)
              ? ROCJITSU_STATUS_SUCCESS
              : ROCJITSU_STATUS_ERROR;
+}
+
+void KmdRpcServer::stop_accepting() {
+  std::lock_guard lock(state_->clients_mutex);
+  state_->accepting_stopped.store(true, std::memory_order_release);
+  if (state_->listen_fd >= 0)
+    ::shutdown(state_->listen_fd, SHUT_RDWR);
 }
 
 void KmdRpcServer::stop() {

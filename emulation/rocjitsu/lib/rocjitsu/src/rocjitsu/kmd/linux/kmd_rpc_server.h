@@ -47,6 +47,9 @@ public:
   KmdRpcServer &operator=(const KmdRpcServer &) = delete;
   rj_status_t bind(const char *path);
   rj_status_t start();
+  /// Stop admitting connections without interrupting existing sessions. This
+  /// is irreversible and nonblocking; stop() still drains and joins clients.
+  void stop_accepting();
   void stop();
   void fail();
   rj_daemon_status_t status() const;
