@@ -7,6 +7,7 @@ rj_add_object_library(rocjitsu_kmd
     guest_kfd.cpp
     libc_passthrough.cpp
     linux_kfd.cpp
+    kmd_rpc_server.cpp
     remote_driver.cpp
     rj_daemon.cpp
     simulated_kfd.cpp
