@@ -6,6 +6,7 @@
 
 #include "rocjitsu/base/rj_compiler.h"
 #include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/device/device_backend.h"
 #include "rocjitsu/kmd/linux/kfd_process.h"
 #include "rocjitsu/kmd/linux/linux_kfd.h"
 #include "rocjitsu/kmd/linux/sysfs.h"
@@ -273,6 +274,7 @@ public:
   /// @brief Per-GPU device state (mirrors kfd_dev in the kernel).
   struct GpuDevice {
     SoC *soc = nullptr;
+    std::unique_ptr<kmd::DeviceBackend> backend;
     uint32_t gpu_id = 0;
     /// Fault reporter bound to this device, so a violation names its own GPU.
     std::unique_ptr<GpuFaultReporter> fault_reporter;

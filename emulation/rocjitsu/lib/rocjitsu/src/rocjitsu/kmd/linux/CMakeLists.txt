@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 rj_add_object_library(rocjitsu_kmd
+    ../device/simdojo_device_backend.cpp
     cwsr.cpp
     events.cpp
     guest_kfd.cpp
