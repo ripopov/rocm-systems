@@ -1,11 +1,16 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include "rocjitsu/kmd/linux/kfd_rpc_device.h"
 #include "rocjitsu/kmd/linux/kmd_command.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
+#include "scoped_temp.h"
+#include "util/unique_handle.h"
 
 #include <cerrno>
 #include <gtest/gtest.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace {
@@ -128,6 +133,68 @@ TEST(KmdCoreTest, SharedCommandExecutorValidatesInlinePayload) {
   EXPECT_EQ(command.result, 0);
   EXPECT_GT(version.major_version, 0);
   EXPECT_EQ(driver.close(process), 0);
+}
+
+TEST(KmdCoreTest, SocketServesCommonKfdWithoutSimulator) {
+  using namespace rocjitsu;
+  test::ScopedTempDirectory directory{"rj-core-rpc-"};
+  const auto path = directory.path() + "/server.sock";
+  auto backend = std::make_unique<TestDeviceBackend>();
+  auto *state = backend.get();
+  std::vector<SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(backend)});
+  SimulatedKfd driver(std::move(devices));
+  Sysfs::GpuInfo gpu{};
+  gpu.gpu_id = 7;
+  driver.setup_topology(gpu);
+  KfdRpcDevice device(driver);
+  KmdRpcServer server(device);
+  ASSERT_EQ(server.bind(path.c_str()), ROCJITSU_STATUS_SUCCESS);
+  ASSERT_EQ(server.start(), ROCJITSU_STATUS_SUCCESS);
+  util::UniqueHandle client(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+  ASSERT_GE(client.get(), 0);
+  timeval timeout{2, 0};
+  ASSERT_EQ(setsockopt(client.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  ASSERT_LT(path.size(), sizeof(address.sun_path));
+  std::strcpy(address.sun_path, path.c_str());
+  ASSERT_EQ(connect(client.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
+
+  RpcHeader request{};
+  request.opcode = RPC_HANDSHAKE;
+  ASSERT_TRUE(rpc_send_exact(client.get(), &request, sizeof(request)));
+  RpcHeader response{};
+  ASSERT_TRUE(rpc_recv_exact(client.get(), &response, sizeof(response)));
+  ASSERT_EQ(response.result, 0);
+  ASSERT_GE(response.payload_bytes, sizeof(RpcHandshakeResponse));
+  ASSERT_LE(response.payload_bytes, kMaxPayloadBytes);
+  std::vector<uint8_t> payload(response.payload_bytes);
+  ASSERT_TRUE(rpc_recv_exact(client.get(), payload.data(), payload.size()));
+  RpcHandshakeResponse handshake{};
+  std::memcpy(&handshake, payload.data(), sizeof(handshake));
+  EXPECT_EQ(handshake.gpu_id, 7u);
+  EXPECT_EQ(handshake.version, kRpcProtocolVersion);
+
+  kfd_ioctl_get_version_args version{};
+  RpcIoctlRequest ioctl_request{};
+  ioctl_request.ioctl_cmd = AMDKFD_IOC_GET_VERSION;
+  ioctl_request.args_bytes = sizeof(version);
+  request.opcode = RPC_IOCTL;
+  request.request_id = 42;
+  request.payload_bytes = sizeof(ioctl_request) + sizeof(version);
+  ASSERT_TRUE(rpc_send_exact(client.get(), &request, sizeof(request)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &ioctl_request, sizeof(ioctl_request)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &version, sizeof(version)));
+  ASSERT_TRUE(rpc_recv_exact(client.get(), &response, sizeof(response)));
+  ASSERT_EQ(response.result, 0);
+  EXPECT_EQ(response.request_id, 42u);
+  ASSERT_EQ(response.payload_bytes, sizeof(version));
+  ASSERT_TRUE(rpc_recv_exact(client.get(), &version, sizeof(version)));
+  EXPECT_GT(version.major_version, 0u);
+  server.stop();
+  EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_STOPPED);
+  EXPECT_EQ(state->live_processes, 0);
 }
 
 } // namespace

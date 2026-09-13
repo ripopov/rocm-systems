@@ -6,6 +6,7 @@
 #include "embedded_schema.h"
 #include "rocjitsu/config/checkpoint.h"
 #include "rocjitsu/kmd/linux/kmd_command.h"
+#include "rocjitsu/kmd/linux/kfd_rpc_device.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
 #include "rocjitsu/vm/amdgpu/partitioning.h"
 #include "rocjitsu/vm/plugins/plugin_loader.h"
@@ -302,35 +303,19 @@ rj_status_t rj_vm_execute_as(rj_vm_t *vm, uint32_t process_id, rj_vm_cmd_t *cmd)
 rj_status_t rj_vm_device_open(rj_vm_t *vm, rj_client_pid_t client_pid, uint32_t *process_id) {
   if (!vm || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  auto *drv = dynamic_cast<SimulatedKfd *>(vm->vm->driver());
-  if (!drv)
-    return ROCJITSU_STATUS_ERROR;
-  // client_pid == 0 (local mode) maps to SimulatedKfd::open_process()'s
-  // default; a nonzero client_pid enables daemon-mode process reuse and
-  // cross-process memory access. Narrow the fixed-width public type to the
-  // platform pid_t at the Linux daemon boundary.
-  uint32_t pid = drv->open_process(static_cast<pid_t>(client_pid));
-  if (pid == 0)
-    return ROCJITSU_STATUS_ERROR;
-  if (process_id)
-    *process_id = pid;
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).open(client_pid, process_id);
 }
 
 rj_status_t rj_vm_device_close(rj_vm_t *vm, uint32_t process_id) {
   if (!vm || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  if (process_id == 0)
-    vm->vm->driver()->close();
-  else
-    vm->vm->driver()->close(process_id);
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).close(process_id);
 }
 
 rj_status_t rj_vm_close_all_devices(rj_vm_t *vm) {
   if (!vm || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  vm->vm->driver()->close_all_processes();
+  KfdRpcDevice(*vm->vm->driver()).close_all();
   return ROCJITSU_STATUS_SUCCESS;
 }
 
@@ -348,15 +333,7 @@ rj_status_t rj_vm_device_map(rj_vm_t *vm, rj_vm_map_t *map) {
 rj_status_t rj_vm_device_map_as(rj_vm_t *vm, uint32_t process_id, rj_vm_map_t *map) {
   if (!vm || !map || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  auto *result = vm->vm->driver()->mmap(
-      process_id, reinterpret_cast<void *>(map->addr), static_cast<size_t>(map->length),
-      static_cast<int>(map->prot), static_cast<int>(map->flags), static_cast<off_t>(map->offset));
-  // Capture errno HERE, immediately after the driver mmap, before any bookkeeping
-  // syscall on the way back out can clobber it. Callers (the daemon RPC path) relay
-  // this to the client rather than reading their own errno across the API boundary.
-  map->map_errno = (result == MAP_FAILED) ? errno : 0;
-  map->mapped_addr = reinterpret_cast<uint64_t>(result);
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).map(process_id, map);
 }
 
 rj_status_t rj_vm_device_unmap(rj_vm_t *vm, rj_vm_unmap_t *unmap) {
@@ -370,91 +347,31 @@ rj_status_t rj_vm_device_unmap(rj_vm_t *vm, rj_vm_unmap_t *unmap) {
 rj_status_t rj_vm_device_unmap_as(rj_vm_t *vm, uint32_t process_id, rj_vm_unmap_t *unmap) {
   if (!vm || !unmap || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  vm->vm->driver()->munmap(process_id, reinterpret_cast<void *>(unmap->addr),
-                           static_cast<size_t>(unmap->length));
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).unmap(process_id, unmap);
 }
 
 rj_status_t rj_vm_gpu_id(rj_vm_t *vm, uint32_t *gpu_id) {
   if (!vm || !gpu_id || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  *gpu_id = vm->vm->driver()->gpu_id();
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).gpu_id(gpu_id);
 }
 
 rj_status_t rj_vm_topology_path(rj_vm_t *vm, const char **path) {
   if (!vm || !path || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  static thread_local std::string cached_path;
-  cached_path = vm->vm->driver()->topology_path();
-  *path = cached_path.c_str();
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).topology_path(path);
 }
 
 rj_status_t rj_vm_drm_path(rj_vm_t *vm, const char **path) {
   if (!vm || !path || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  static thread_local std::string cached_drm;
-  cached_drm = vm->vm->driver()->topology().drm_path();
-  *path = cached_drm.c_str();
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).drm_path(path);
 }
 
 rj_status_t rj_vm_gpu_info(rj_vm_t *vm, rj_vm_gpu_info_t *info) {
   if (!vm || !info || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-
-  const auto &gpu = vm->vm->driver()->topology().gpu_info();
-  *info = {};
-  info->present = 1;
-  info->gpu_id = gpu.gpu_id;
-  info->gfx_target_version = gpu.gfx_target_version;
-  info->vendor_id = gpu.vendor_id;
-  info->device_id = gpu.device_id;
-  info->family_id = gpu.family_id;
-  info->unique_id = gpu.unique_id;
-  info->location_id = gpu.location_id;
-  info->domain = gpu.domain;
-  info->hive_id = gpu.hive_id;
-  info->drm_render_minor = gpu.drm_render_minor;
-  info->revision_id = gpu.revision_id;
-  info->pci_revision_id = gpu.pci_revision_id;
-  info->simd_count = gpu.simd_count;
-  info->max_waves_per_simd = gpu.max_waves_per_simd;
-  info->num_shader_engines = gpu.num_shader_engines;
-  info->num_shader_arrays_per_engine = gpu.num_shader_arrays_per_engine;
-  info->num_cu_per_sh = gpu.num_cu_per_sh;
-  info->simd_per_cu = gpu.simd_per_cu;
-  info->wave_front_size = gpu.wave_front_size;
-  info->num_xcc = gpu.num_xcc;
-  info->max_slots_scratch_cu = gpu.max_slots_scratch_cu;
-  info->local_mem_size = gpu.local_mem_size;
-  info->vram_type = gpu.vram_type;
-  info->lds_size_kb = gpu.lds_size_kb;
-  info->mem_width = gpu.mem_width;
-  info->mem_clk_max = gpu.mem_clk_max;
-  info->l1_size_kb = gpu.l1_size_kb;
-  info->l1_line_size = gpu.l1_line_size;
-  info->l1_assoc = gpu.l1_assoc;
-  info->l2_size_kb = gpu.l2_size_kb;
-  info->l2_line_size = gpu.l2_line_size;
-  info->l2_assoc = gpu.l2_assoc;
-  info->num_sdma_engines = gpu.num_sdma_engines;
-  info->num_sdma_xgmi_engines = gpu.num_sdma_xgmi_engines;
-  info->num_cp_queues = gpu.num_cp_queues;
-  info->max_engine_clk_fcompute = gpu.max_engine_clk_fcompute;
-  info->capability = gpu.capability;
-  info->capability2 = gpu.capability2;
-  info->debug_prop = gpu.debug_prop;
-  info->fw_version = gpu.fw_version;
-  info->sdma_fw_version = gpu.sdma_fw_version;
-
-  size_t name_len = gpu.marketing_name.size();
-  if (name_len >= sizeof(info->marketing_name))
-    name_len = sizeof(info->marketing_name) - 1;
-  std::memcpy(info->marketing_name, gpu.marketing_name.data(), name_len);
-  info->marketing_name[name_len] = '\0';
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).gpu_info(info);
 }
 
 rj_status_t rj_vm_get_shared_mem(rj_vm_t *vm, int64_t offset, rj_handle_t *handle) {
@@ -468,6 +385,5 @@ rj_status_t rj_vm_get_shared_mem_as(rj_vm_t *vm, uint32_t process_id, int64_t of
                                     rj_handle_t *handle) {
   if (!vm || !handle || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  *handle = vm->vm->driver()->get_mmap_memfd(process_id, static_cast<off_t>(offset));
-  return ROCJITSU_STATUS_SUCCESS;
+  return KfdRpcDevice(*vm->vm->driver()).shared_mem(process_id, static_cast<uint64_t>(offset), handle);
 }
