@@ -130,11 +130,15 @@ TEST_F(KmdRpcServerTest, StopDrainsBlockedDeviceOperation) {
     ASSERT_TRUE(
         device.changed.wait_for(lock, std::chrono::seconds(5), [&] { return device.entered; }));
   }
+  EXPECT_EQ(server.statistics().active_clients, 1u);
+  EXPECT_EQ(server.statistics().pending_requests, 1u);
   server.stop_accepting();
   EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_RUNNING);
   server.stop();
   EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_STOPPED);
   EXPECT_EQ(device.closes.load(), 1u);
+  EXPECT_EQ(server.statistics().active_clients, 0u);
+  EXPECT_EQ(server.statistics().pending_requests, 0u);
   EXPECT_FALSE(std::filesystem::exists(path));
 }
 
@@ -199,6 +203,34 @@ TEST_F(KmdRpcServerTest, QuiescedListenerCannotBeStarted) {
   EXPECT_FALSE(std::filesystem::exists(path));
 }
 
+TEST_F(KmdRpcServerTest, TransportWakeReportsRejectedRequestAndDisconnectWithoutDeviceCallback) {
+  CallbackDispatcher dispatcher;
+  KmdRpcServer observed{device, [&] { dispatcher.wake(); }};
+  ASSERT_EQ(observed.bind(path.c_str()), ROCJITSU_STATUS_SUCCESS);
+  ASSERT_EQ(observed.start(), ROCJITSU_STATUS_SUCCESS);
+  auto client = connect_client();
+  ASSERT_GE(client.get(), 0);
+  handshake(client.get());
+  EXPECT_EQ(observed.statistics().active_clients, 1u);
+  dispatcher.dispatch();
+  RpcHeader invalid{};
+  invalid.reserved = 1;
+  ASSERT_TRUE(rpc_send_exact(client.get(), &invalid, sizeof(invalid)));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  do {
+    pollfd notification{dispatcher.fd(), POLLIN, 0};
+    ASSERT_EQ(::poll(&notification, 1, 5000), 1);
+    dispatcher.dispatch();
+    const auto state = observed.statistics();
+    if (!state.active_clients) {
+      EXPECT_EQ(state.pending_requests, 0u);
+      EXPECT_EQ(device.closes.load(), 1u);
+      return;
+    }
+  } while (std::chrono::steady_clock::now() < deadline);
+  FAIL() << "transport did not publish a drained disconnect";
+}
+
 TEST_F(KmdRpcServerTest, OwnerDispatchesCleanupWhileTransportJoinsBlockedClients) {
   CallbackDispatcher dispatcher;
   const auto owner = std::this_thread::get_id();
@@ -229,7 +261,11 @@ TEST_F(KmdRpcServerTest, OwnerDispatchesCleanupWhileTransportJoinsBlockedClients
     CallbackDispatcher &dispatcher_;
     std::thread::id owner_;
   } embedded_device{dispatcher, owner};
-  KmdRpcServer embedded_server{embedded_device};
+  std::atomic<unsigned> notifications{0};
+  KmdRpcServer embedded_server{embedded_device, [&] {
+    ++notifications;
+    dispatcher.wake();
+  }};
   ASSERT_EQ(embedded_server.bind(path.c_str()), ROCJITSU_STATUS_SUCCESS);
   ASSERT_EQ(embedded_server.start(), ROCJITSU_STATUS_SUCCESS);
   auto client = connect_client();
@@ -257,6 +293,9 @@ TEST_F(KmdRpcServerTest, OwnerDispatchesCleanupWhileTransportJoinsBlockedClients
   EXPECT_EQ(embedded_server.status(), RJ_DAEMON_STATUS_STOPPED);
   EXPECT_EQ(embedded_device.opens.load(), 1u);
   EXPECT_EQ(embedded_device.closes.load(), 1u);
+  EXPECT_GT(notifications.load(), 0u);
+  EXPECT_EQ(embedded_server.statistics().active_clients, 0u);
+  EXPECT_EQ(embedded_server.statistics().pending_requests, 0u);
 }
 
 } // namespace

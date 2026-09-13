@@ -9,10 +9,16 @@
 #include "rocjitsu/vm/rj_vm.h"
 
 #include <memory>
+#include <functional>
 
 namespace rocjitsu {
 
 struct KmdRpcState;
+
+struct KmdRpcStatistics {
+  uint64_t active_clients = 0;
+  uint64_t pending_requests = 0;
+};
 
 /// @brief Process operations served by the shared KFD RPC transport.
 /// @details The owner keeps this object alive until the server has stopped.
@@ -41,7 +47,9 @@ public:
 /// by the owner; fail() may be called by its engine thread.
 class KmdRpcServer {
 public:
-  explicit KmdRpcServer(KmdRpcDevice &device);
+  /// state_changed is a nonblocking, nonthrowing wakeup only. It can run on
+  /// any transport thread and must not call back into the server or device.
+  explicit KmdRpcServer(KmdRpcDevice &device, std::function<void()> state_changed = {});
   ~KmdRpcServer();
   KmdRpcServer(const KmdRpcServer &) = delete;
   KmdRpcServer &operator=(const KmdRpcServer &) = delete;
@@ -53,6 +61,8 @@ public:
   void stop();
   void fail();
   rj_daemon_status_t status() const;
+  /// Consistent transport-only snapshot, never acquires device/KFD locks.
+  KmdRpcStatistics statistics() const;
 
 private:
   std::unique_ptr<KmdRpcState> state_;
