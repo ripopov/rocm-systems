@@ -5,6 +5,7 @@
 
 #include "embedded_schema.h"
 #include "rocjitsu/config/checkpoint.h"
+#include "rocjitsu/kmd/linux/kmd_command.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
 #include "rocjitsu/vm/amdgpu/partitioning.h"
 #include "rocjitsu/vm/plugins/plugin_loader.h"
@@ -382,77 +383,18 @@ rj_status_t rj_vm_restore_checkpoint(const char *path, rj_vm_t **vm) {
   }
 }
 
-namespace {
-
-rj_status_t execute_impl(SimulatedKfd *driver, uint32_t process_id, rj_vm_cmd_t *cmd) {
-  auto arg_size = _IOC_SIZE(cmd->cmd);
-  if (!reconstruct_embedded_pointers(cmd->cmd, cmd->buf, arg_size, cmd->buf_size)) {
-    cmd->result = -EINVAL;
-    cmd->shared_handle = -1;
-    return ROCJITSU_STATUS_SUCCESS;
-  }
-
-  // For DBG_TRAP ENABLE the debugger's notifier pipe arrives as an SCM_RIGHTS
-  // fd in cmd->in_handle (already in the daemon's fd space). Substitute it for
-  // the client-side fd number in the payload so the driver signals the right
-  // pipe when a wave stops (the kernel receives the same fd via the ioctl). On
-  // success the debug session takes ownership (cmd->in_handle cleared so the
-  // transport does not close it); otherwise the transport reclaims it. Only
-  // daemon mode transfers the fd; local mode passes the debugger's own fd
-  // through the interposer and leaves cmd->in_handle at -1.
-  //
-  // The client-supplied dbg_fd is a number in the *client's* fd table and is
-  // never trusted in the daemon's namespace. Overwrite it unconditionally for
-  // ENABLE: with the transferred fd when one arrived via SCM_RIGHTS, otherwise
-  // with KFD_INVALID_FD so the handler's fcntl() check rejects it. Leaving the
-  // client's integer in place would let a client that omits the ancillary fd
-  // point the session at an arbitrary daemon-owned descriptor (a confused-deputy
-  // fd substitution).
-  bool adopting_notifier = false;
-  if (driver->daemon_mode() && cmd->cmd == AMDKFD_IOC_DBG_TRAP) {
-    auto *dbg = static_cast<kfd_ioctl_dbg_trap_args *>(cmd->buf);
-    if (dbg->op == KFD_IOC_DBG_TRAP_ENABLE) {
-      if (cmd->in_handle >= 0) {
-        dbg->enable.dbg_fd = static_cast<uint32_t>(cmd->in_handle);
-        adopting_notifier = true;
-      } else {
-        dbg->enable.dbg_fd = KFD_INVALID_FD;
-      }
-    }
-  }
-
-  cmd->result =
-      driver->ioctl(process_id, cmd->cmd, cmd->buf, &cmd->in_mem_handle, cmd->in_proc_handle);
-  cmd->shared_handle = -1;
-  if (adopting_notifier && cmd->result == 0)
-    cmd->in_handle = -1;
-
-  if (cmd->cmd == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU && cmd->result == 0) {
-    auto *alloc_args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(cmd->buf);
-    cmd->shared_handle =
-        driver->get_mmap_memfd(process_id, static_cast<off_t>(alloc_args->mmap_offset));
-  } else if (cmd->cmd == AMDKFD_IOC_IPC_IMPORT_HANDLE && cmd->result == 0) {
-    auto *import_args = static_cast<kfd_ioctl_ipc_import_handle_args *>(cmd->buf);
-    cmd->shared_handle =
-        driver->get_mmap_memfd(process_id, static_cast<off_t>(import_args->mmap_offset));
-  }
-
-  return ROCJITSU_STATUS_SUCCESS;
-}
-
-} // namespace
 
 rj_status_t rj_vm_execute(rj_vm_t *vm, rj_vm_cmd_t *cmd) {
   if (!vm || !cmd || !cmd->buf || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
   auto *driver = vm->vm->driver();
-  return execute_impl(driver, driver->local_process_id(), cmd);
+  return execute_kmd_command(driver, driver->local_process_id(), cmd);
 }
 
 rj_status_t rj_vm_execute_as(rj_vm_t *vm, uint32_t process_id, rj_vm_cmd_t *cmd) {
   if (!vm || !cmd || !cmd->buf || !vm->vm || !vm->vm->driver())
     return ROCJITSU_STATUS_INVALID_ARGUMENT;
-  return execute_impl(vm->vm->driver(), process_id, cmd);
+  return execute_kmd_command(vm->vm->driver(), process_id, cmd);
 }
 
 rj_status_t rj_vm_device_open(rj_vm_t *vm, rj_client_pid_t client_pid, uint32_t *process_id) {
