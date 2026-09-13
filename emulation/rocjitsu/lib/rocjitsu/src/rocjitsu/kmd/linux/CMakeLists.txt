@@ -8,6 +8,7 @@ add_library(rocjitsu_kmd_common OBJECT
     libc_passthrough.cpp
     linux_kfd.cpp
     kmd_command.cpp
+    kfd_rpc_device.cpp
     kmd_rpc_server.cpp
     simulated_kfd.cpp
     sysfs.cpp
