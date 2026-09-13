@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-add_executable(kmd_core_tests kmd_core_test.cpp)
+add_executable(kmd_core_tests kmd_core_test.cpp callback_device_backend_test.cpp)
 target_link_libraries(kmd_core_tests PRIVATE rocjitsu_kmd_core GTest::gtest_main)
 rj_configure_target(kmd_core_tests PRIVATE_INCLUDES WARNINGS)
 rj_add_gtest_tests(kmd_core_tests)

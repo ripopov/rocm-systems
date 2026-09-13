@@ -98,6 +98,19 @@ public:
     return pending_locked();
   }
 
+  bool contains(uint32_t process, uint32_t queue) const {
+    std::lock_guard lock(mutex_);
+    return queues_.contains(key(process, queue));
+  }
+
+  size_t active() const {
+    std::lock_guard lock(mutex_);
+    size_t count = 0;
+    for (const auto &[id, watch] : queues_)
+      count += watch.active;
+    return count;
+  }
+
   size_t drain(rj_kmd_doorbell_record_t *records, size_t capacity) {
     std::lock_guard lock(mutex_);
     size_t count = 0;

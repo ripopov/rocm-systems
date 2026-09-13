@@ -3,6 +3,7 @@
 
 # Common KFD policy and transport intentionally compile without simdojo headers.
 add_library(rocjitsu_kmd_common OBJECT
+    ../device/callback_device_backend.cpp
     cwsr.cpp
     events.cpp
     libc_passthrough.cpp
