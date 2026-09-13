@@ -4,14 +4,32 @@
 #ifndef ROCJITSU_KMD_DEVICE_DEVICE_BACKEND_H_
 #define ROCJITSU_KMD_DEVICE_DEVICE_BACKEND_H_
 
+#include "rocjitsu/code/rj_code.h"
 #include "rocjitsu/kmd/device/memory_fault.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 namespace rocjitsu {
 class KfdProcess;
 namespace kmd {
+
+struct DeviceApertures {
+  uint64_t lds_base = 0;
+  uint64_t lds_limit = 0;
+  uint64_t scratch_base = 0;
+  uint64_t scratch_limit = 0;
+};
+
+/// Device execution reports events and requests scratch backing from KFD.
+/// Callbacks must run without locks that KFD's device calls also acquire.
+struct DeviceCallbacks {
+  std::function<void(uint32_t process, uint32_t event)> interrupt;
+  std::function<uint64_t(uint32_t process)> scratch_backing;
+  std::function<bool(uint32_t process, uint64_t address, size_t size)> allocate_scratch;
+};
 
 /// @brief A queue programmed by KFD, independent of the execution engine.
 struct QueueDescriptor {
@@ -39,6 +57,9 @@ struct QueueDescriptor {
 class DeviceBackend {
 public:
   virtual ~DeviceBackend() = default;
+  virtual rj_code_arch_t architecture() const = 0;
+  virtual void configure(const DeviceApertures &apertures, uint32_t scratch_wave_divisor,
+                         const DeviceCallbacks &callbacks) = 0;
   virtual void set_memory_fault_reporter(MemoryFaultReporter *reporter) = 0;
   /// Borrow the common process address space until unregister_process returns.
   /// A negative errno leaves no device-side process state. Passthrough is only

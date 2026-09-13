@@ -13,6 +13,9 @@ namespace kmd {
 class SimdojoDeviceBackend final : public DeviceBackend {
 public:
   explicit SimdojoDeviceBackend(SoC &soc) : soc_(soc) {}
+  rj_code_arch_t architecture() const override;
+  void configure(const DeviceApertures &apertures, uint32_t scratch_wave_divisor,
+                 const DeviceCallbacks &callbacks) override;
   void set_memory_fault_reporter(MemoryFaultReporter *reporter) override;
   int register_process(KfdProcess &process, bool passthrough) override;
   void unregister_process(uint32_t process) override;
