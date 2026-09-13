@@ -1100,6 +1100,11 @@ int SimulatedKfd::close(uint32_t process_id) {
     for (auto &g : gpus_)
       if (g.backend)
         g.backend->destroy_queue(process_id, qid);
+  // Process removal is the infallible teardown boundary for outstanding GPU
+  // mappings. Keep every allocation lease alive until devices are quiescent.
+  for (auto &g : gpus_)
+    if (g.backend)
+      g.backend->unregister_process(process_id);
 
   const bool trace_enabled = vm_trace_enabled();
   size_t leaked_allocations = 0;
@@ -1225,10 +1230,6 @@ int SimulatedKfd::close(uint32_t process_id) {
       }
     }
   }
-  for (auto &g : gpus_)
-    if (g.backend)
-      g.backend->unregister_process(process_id);
-
   return 0;
 }
 
@@ -1998,9 +1999,9 @@ int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
   bool is_userptr = (args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) != 0;
   bool is_doorbell = (args->flags & KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL) != 0;
   auto *gpu = find_gpu(args->gpu_id);
-  auto *allocator = gpu && gpu->backend ? gpu->backend->allocator() : nullptr;
+  auto *allocator = gpu && gpu->backend ? gpu->backend->memory() : nullptr;
   if (!gpu && std::any_of(gpus_.begin(), gpus_.end(), [](const auto &device) {
-        return device.backend && device.backend->allocator();
+        return device.backend && device.backend->memory();
       }))
     return -EINVAL;
   if (allocator && !is_doorbell) {
@@ -2019,7 +2020,8 @@ int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
     constexpr auto max_offset = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
     if (storage.fd < 0 || storage.file_offset > max_offset ||
         storage.size > max_offset - storage.file_offset || storage.size < alloc.size ||
-        (storage.file_offset & 0xFFF) || safe_fstat(storage.fd, &st) != 0 || st.st_size < 0 ||
+        storage.device_address > UINT64_MAX - alloc.size || (storage.file_offset & 0xFFF) ||
+        safe_fstat(storage.fd, &st) != 0 || st.st_size < 0 ||
         storage.file_offset + storage.size > static_cast<uint64_t>(st.st_size))
       return -EINVAL;
     UniqueDriverFd backing(safe_fcntl(storage.fd, F_DUPFD_CLOEXEC, 0));
@@ -2208,6 +2210,19 @@ int SimulatedKfd::free_memory_ioctl(KfdProcess &proc, void *arg) {
   auto it = proc.allocations_.find(args->handle);
   if (it != proc.allocations_.end()) {
     auto &alloc = it->second;
+    // A failed device unmap must not release or recycle its physical backing.
+    // Successfully removed devices stay removed if another device refuses;
+    // retrying FREE resumes from the remaining mappings.
+    for (auto mapped = alloc.mapped_gpu_ids.begin(); mapped != alloc.mapped_gpu_ids.end();) {
+      auto *device = find_gpu(*mapped);
+      if (!device || !device->backend || !device->backend->memory())
+        return -EIO;
+      const int result =
+          device->backend->memory()->unmap(proc.process_id(), alloc.gpu_va, alloc.size);
+      if (result != 0)
+        return result < 0 ? result : -EIO;
+      mapped = alloc.mapped_gpu_ids.erase(mapped);
+    }
     if (alloc.imported && alloc.dmabuf_fd >= 0) {
       libc_passthrough().close(alloc.dmabuf_fd);
       if (auto dmabuf_it = proc.imported_dmabufs_.find(args->handle);
@@ -2268,6 +2283,42 @@ int SimulatedKfd::map_memory_ioctl(KfdProcess &proc, void *arg) {
                       alloc.handle, alloc.gpu_va, alloc.size, args->n_devices,
                       alloc.host_ptr != nullptr);
   });
+  if (alloc.device_allocation) {
+    if (args->n_success > args->n_devices)
+      return -EINVAL;
+    if (args->n_devices != 0 && !args->device_ids_array_ptr)
+      return -EFAULT;
+    const auto *ids = reinterpret_cast<const uint32_t *>(args->device_ids_array_ptr);
+    auto *source = find_gpu(alloc.gpu_id);
+    for (; args->n_success < args->n_devices; ++args->n_success) {
+      const auto id = ids[args->n_success];
+      auto *device = find_gpu(id);
+      if (!device || !device->backend)
+        return -EINVAL;
+      auto *memory = device->backend->memory();
+      if (!memory || !source || memory != source->backend->memory())
+        return -EXDEV;
+      const auto &storage = *alloc.device_allocation;
+      const kmd::DeviceMapping mapping{
+          proc.process_id(), storage.id,
+          alloc.gpu_va,      storage.device_address,
+          alloc.size,        static_cast<uint8_t>(pte_mtype_for_flags(alloc.flags))};
+      // Reserve bookkeeping before programming the device: allocation failure
+      // in the container must not leave an untracked live GPU mapping.
+      const auto [tracked, newly_tracked] = alloc.mapped_gpu_ids.insert(id);
+      const int result = memory->map(mapping);
+      if (result != 0) {
+        if (newly_tracked)
+          alloc.mapped_gpu_ids.erase(tracked);
+        return result < 0 ? result : -EIO;
+      }
+    }
+  } else if (!(alloc.flags & KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL) &&
+             std::any_of(gpus_.begin(), gpus_.end(), [](const auto &device) {
+               return device.backend && device.backend->memory();
+             })) {
+    return -ENOTSUP;
+  }
   if (alloc.host_ptr)
     map_to_gpu(proc, alloc.gpu_va, alloc.host_ptr, alloc.size, pte_mtype_for_flags(alloc.flags));
   args->n_success = args->n_devices;
@@ -2284,6 +2335,30 @@ int SimulatedKfd::unmap_memory_ioctl(KfdProcess &proc, void *arg) {
     // releases it. Erasing here would leak those fds and make a later FREE a
     // no-op for this handle.
     auto &alloc = it->second;
+    if (alloc.device_allocation) {
+      if (args->n_success > args->n_devices)
+        return -EINVAL;
+      if (args->n_devices != 0 && !args->device_ids_array_ptr)
+        return -EFAULT;
+      const auto *ids = reinterpret_cast<const uint32_t *>(args->device_ids_array_ptr);
+      for (; args->n_success < args->n_devices; ++args->n_success) {
+        const auto id = ids[args->n_success];
+        auto *device = find_gpu(id);
+        if (!device || !device->backend)
+          return -EINVAL;
+        if (alloc.mapped_gpu_ids.contains(id)) {
+          auto *memory = device->backend->memory();
+          if (!memory)
+            return -EIO;
+          const int result = memory->unmap(proc.process_id(), alloc.gpu_va, alloc.size);
+          if (result != 0)
+            return result < 0 ? result : -EIO;
+          alloc.mapped_gpu_ids.erase(id);
+        }
+      }
+      if (!alloc.mapped_gpu_ids.empty())
+        return 0;
+    }
     if (alloc.host_ptr)
       unmap_from_gpu(proc, alloc.gpu_va, alloc.size);
   }
@@ -2516,7 +2591,7 @@ int SimulatedKfd::import_dmabuf_ioctl(KfdProcess &proc, void *arg) {
   const auto *gpu = find_gpu(args->gpu_id);
   if (!gpu)
     return -EINVAL;
-  if (gpu->backend && gpu->backend->allocator())
+  if (gpu->backend && gpu->backend->memory())
     return -ENOTSUP; // No backend dma-buf attachment contract is implemented yet.
 
   struct stat st{};
