@@ -348,6 +348,11 @@ add_dependencies(rj_decode_fuzz_test rj_decode_fuzz)
 rj_add_gtest_tests(rj_decode_fuzz_test)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_executable(kmd_core_tests kmd_core_test.cpp)
+target_link_libraries(kmd_core_tests PRIVATE rocjitsu_kmd_core GTest::gtest_main)
+rj_configure_target(kmd_core_tests PRIVATE_INCLUDES WARNINGS)
+rj_add_gtest_tests(kmd_core_tests)
+
 add_executable(kmd_rpc_server_tests
     kmd_rpc_server_test.cpp
     ${ROCJITSU_SRC_DIR}/rocjitsu/kmd/linux/kmd_rpc_server.cpp

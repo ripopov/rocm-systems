@@ -789,7 +789,7 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
         // untouched -- kfd_dbg_trap_device_snapshot(), reproduced by
         // SimulatedKfd::debug_device_snapshot), but the daemon cannot: it
         // rewrites snapshot_buf_ptr to its own inline tail before replaying the
-        // ioctl (rj_vm.cpp, reconstruct_embedded_pointers), so the driver never
+        // ioctl (kmd_command.cpp, reconstruct_embedded_pointers), so the driver never
         // sees the null and answers a malformed request with success and a
         // device total. Failing client-side is what keeps the two transports
         // returning the same verdict.

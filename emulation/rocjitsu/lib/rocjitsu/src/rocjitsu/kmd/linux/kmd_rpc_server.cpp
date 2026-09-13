@@ -91,7 +91,7 @@ bool validate_ioctl_payload(uint32_t command, const void *buffer, size_t buffer_
     // the exact-length test below rejects a well-formed request and the
     // connection is dropped. Keep this in step with the tail sizes
     // RemoteDriver::send_ioctl() computes and the pointers
-    // reconstruct_embedded_pointers() repoints (rj_vm.cpp) -- all three must
+    // reconstruct_embedded_pointers() repoints (kmd_command.cpp) -- all three must
     // agree on the same set of ops.
     const auto *args = static_cast<const kfd_ioctl_dbg_trap_args *>(buffer);
     switch (args->op) {
