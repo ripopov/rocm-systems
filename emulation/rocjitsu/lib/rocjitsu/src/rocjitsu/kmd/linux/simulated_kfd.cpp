@@ -26,6 +26,7 @@ RJ_DIAGNOSTIC_POP
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <fcntl.h>
 #include <format>
@@ -1953,20 +1954,26 @@ int SimulatedKfd::unmap_memory_ioctl(void *arg) {
 int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
   auto *args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arg);
 
+  if (args->size == 0 || args->size > static_cast<uint64_t>(std::numeric_limits<off_t>::max()) ||
+      args->va_addr > UINT64_MAX - args->size)
+    return -EINVAL;
+  const uint64_t aligned_size = (args->size + 0xFFF) & ~0xFFFULL;
+
   std::lock_guard<std::mutex> lock(proc.alloc_mutex_);
 
   bool user_provided_va = (args->va_addr != 0);
   uint64_t va = args->va_addr;
   if (va == 0) {
     va = proc.next_gpu_va_;
-    proc.next_gpu_va_ += (args->size + 0xFFF) & ~0xFFFULL;
+    if (va > UINT64_MAX - aligned_size)
+      return -ENOMEM;
   }
 
   KfdProcess::GpuAllocation alloc{};
   alloc.gpu_va = va;
   alloc.size = args->size;
   alloc.flags = args->flags;
-  alloc.handle = proc.next_handle_++;
+  alloc.handle = proc.next_handle_;
   alloc.host_ptr = nullptr;
   alloc.gpu_id = args->gpu_id;
   alloc.user_va = user_provided_va;
@@ -1978,39 +1985,42 @@ int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
     alloc.host_ptr = reinterpret_cast<void *>(va);
     map_to_gpu(proc, va, reinterpret_cast<void *>(va), args->size, alloc_mtype);
   } else if (daemon_mode_ || !user_provided_va) {
-    auto raw_fd = memfd_create("rocjitsu_alloc", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (raw_fd >= 0) {
-      alloc.memfd = safe_fcntl(raw_fd, F_DUPFD_CLOEXEC, 4096);
-      if (alloc.memfd < 0)
-        alloc.memfd = raw_fd;
-      else
-        libc_passthrough().close(raw_fd);
-      {
-        std::lock_guard<std::mutex> lk(owned_fds_mutex_);
-        owned_fds_.insert(alloc.memfd);
-      }
-      if (alloc.memfd >= 0) {
-        [[maybe_unused]] auto ft_rc = ftruncate(alloc.memfd, static_cast<off_t>(alloc.size));
-        fallocate(alloc.memfd, 0, 0, static_cast<off_t>(alloc.size));
-        safe_fcntl(alloc.memfd, F_ADD_SEALS, F_SEAL_SHRINK);
+    UniqueDriverFd backing(memfd_create("rocjitsu_alloc", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    if (!backing)
+      return -errno;
+    const int reserved = safe_fcntl(backing.get(), F_DUPFD_CLOEXEC, 4096);
+    if (reserved >= 0)
+      backing.reset(reserved);
+    if (ftruncate(backing.get(), static_cast<off_t>(alloc.size)) != 0)
+      return -errno;
+    // Preallocation is best-effort; the shared file's validated logical extent
+    // and shrink seal are required even when physical pages are demand-backed.
+    (void)fallocate(backing.get(), 0, 0, static_cast<off_t>(alloc.size));
+    if (safe_fcntl(backing.get(), F_ADD_SEALS, F_SEAL_SHRINK) != 0)
+      return -errno;
 
-        if (daemon_mode_ && !is_doorbell) {
-          auto *mapped =
-              safe_mmap(nullptr, alloc.size, PROT_READ | PROT_WRITE, MAP_SHARED, alloc.memfd, 0);
-          if (mapped != MAP_FAILED) {
-            alloc.host_ptr = mapped;
-            alloc.host_ptr_owned = true;
-            // Driver-owned: this is our memfd, mapped read-write here and held
-            // open, so nothing outside can change its protection or unmap it.
-            map_to_gpu(proc, va, alloc.host_ptr, alloc.size, alloc_mtype,
-                       KfdProcess::HostExtentOwner::Driver);
-          }
-        }
-      }
+    if (daemon_mode_ && !is_doorbell) {
+      auto *mapped = safe_mmap(nullptr, alloc.size, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, backing.get(), 0);
+      if (mapped == MAP_FAILED)
+        return -errno;
+      alloc.host_ptr = mapped;
+      alloc.host_ptr_owned = true;
+      map_to_gpu(proc, va, mapped, alloc.size, alloc_mtype, KfdProcess::HostExtentOwner::Driver);
     }
+    alloc.memfd = backing.get();
+    {
+      std::lock_guard<std::mutex> lk(owned_fds_mutex_);
+      owned_fds_.insert(alloc.memfd);
+    }
+    static_cast<void>(backing.release());
   }
 
   proc.allocations_[alloc.handle] = alloc;
+
+  ++proc.next_handle_;
+  if (!user_provided_va)
+    proc.next_gpu_va_ += aligned_size;
 
   args->handle = alloc.handle;
   args->va_addr = va;
