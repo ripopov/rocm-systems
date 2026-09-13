@@ -11,8 +11,10 @@
 #include <csignal>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -138,6 +140,67 @@ TEST(KmdCoreTest, SharedCommandExecutorValidatesInlinePayload) {
   EXPECT_EQ(driver.close(process), 0);
 }
 
+TEST(KmdCoreTest, SharedBackingSliceSurvivesMappingAndIpcImport) {
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::make_unique<TestDeviceBackend>()});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto source = driver.open_process();
+  const auto target = driver.open_process();
+  ASSERT_NE(source, 0);
+  ASSERT_NE(target, 0);
+  const int fd = static_cast<int>(syscall(SYS_memfd_create, "core-backing-slice", MFD_CLOEXEC));
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(ftruncate(fd, 16384), 0);
+  const uint64_t marker = 0xabcd12344321dcbaULL;
+  ASSERT_EQ(pwrite(fd, &marker, sizeof(marker), 8192), sizeof(marker));
+  // Supply a backend-style allocation whose logical range occupies one page
+  // in a larger file. The KFD owns this descriptor from here through close().
+  auto process = driver.find_process(source);
+  auto &allocation = process->allocations_[42];
+  allocation.handle = 42;
+  allocation.gpu_id = 7;
+  allocation.gpu_va = 0x1000000000ULL;
+  allocation.size = 4096;
+  allocation.memfd = fd;
+  allocation.memfd_offset = 8192;
+
+  rocjitsu::KfdRpcDevice device(driver);
+  rj_vm_map_t map{};
+  map.length = 4096;
+  map.offset = 42 << 12;
+  map.prot = PROT_READ | PROT_WRITE;
+  map.flags = MAP_SHARED;
+  ASSERT_EQ(device.map(source, &map), ROCJITSU_STATUS_SUCCESS);
+  ASSERT_EQ(map.map_errno, 0);
+  EXPECT_EQ(map.shared_handle, fd);
+  EXPECT_EQ(map.shared_offset, 8192);
+  EXPECT_EQ(map.shared_size, 4096);
+  EXPECT_EQ(*reinterpret_cast<uint64_t *>(map.mapped_addr), marker);
+
+  kfd_ioctl_ipc_export_handle_args export_args{};
+  export_args.handle = 42;
+  ASSERT_EQ(driver.ioctl(source, AMDKFD_IOC_IPC_EXPORT_HANDLE, &export_args), 0);
+  kfd_ioctl_ipc_import_handle_args import_args{};
+  std::memcpy(import_args.share_handle, export_args.share_handle, sizeof(import_args.share_handle));
+  import_args.gpu_id = 7;
+  rj_vm_cmd_t command{};
+  command.cmd = AMDKFD_IOC_IPC_IMPORT_HANDLE;
+  command.buf = &import_args;
+  command.buf_size = sizeof(import_args);
+  ASSERT_EQ(device.execute(target, &command), ROCJITSU_STATUS_SUCCESS);
+  ASSERT_EQ(command.result, 0);
+  EXPECT_GE(command.shared_handle, 0);
+  EXPECT_EQ(command.shared_offset, 8192);
+  EXPECT_EQ(command.shared_size, 4096);
+  const auto imported = driver.find_process(target);
+  EXPECT_EQ(*static_cast<uint64_t *>(imported->allocations_.at(import_args.handle).host_ptr),
+            marker);
+  EXPECT_EQ(driver.close(source), 0);
+  EXPECT_EQ(*static_cast<uint64_t *>(imported->allocations_.at(import_args.handle).host_ptr),
+            marker);
+  EXPECT_EQ(driver.close(target), 0);
+}
+
 TEST(KmdCoreTest, SocketServesCommonKfdWithoutSimulator) {
   using namespace rocjitsu;
   test::ScopedTempDirectory directory{"rj-core-rpc-"};
@@ -195,6 +258,58 @@ TEST(KmdCoreTest, SocketServesCommonKfdWithoutSimulator) {
   ASSERT_EQ(response.payload_bytes, sizeof(version));
   ASSERT_TRUE(rpc_recv_exact(client.get(), &version, sizeof(version)));
   EXPECT_GT(version.major_version, 0u);
+
+  kfd_ioctl_alloc_memory_of_gpu_args allocation{};
+  allocation.gpu_id = 7;
+  allocation.size = 4096;
+  allocation.flags = KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  ioctl_request.ioctl_cmd = AMDKFD_IOC_ALLOC_MEMORY_OF_GPU;
+  ioctl_request.args_bytes = sizeof(allocation);
+  request.request_id = 43;
+  request.payload_bytes = sizeof(ioctl_request) + sizeof(allocation);
+  ASSERT_TRUE(rpc_send_exact(client.get(), &request, sizeof(request)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &ioctl_request, sizeof(ioctl_request)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &allocation, sizeof(allocation)));
+  int received_fd = -1;
+  size_t num_fds = 1;
+  ASSERT_EQ(rpc_recv_msg(client.get(), &response, sizeof(response), &received_fd, &num_fds),
+            sizeof(response));
+  util::UniqueHandle allocation_fd(received_fd);
+  ASSERT_EQ(response.result, 0);
+  EXPECT_EQ(response.request_id, 43);
+  ASSERT_EQ(num_fds, 1);
+  ASSERT_GE(allocation_fd.get(), 0);
+  ASSERT_EQ(response.payload_bytes, sizeof(RpcSharedBacking) + sizeof(allocation));
+  RpcSharedBacking backing{};
+  ASSERT_TRUE(rpc_recv_exact(client.get(), &backing, sizeof(backing)));
+  ASSERT_TRUE(rpc_recv_exact(client.get(), &allocation, sizeof(allocation)));
+  EXPECT_EQ(backing.offset, 0);
+  EXPECT_EQ(backing.size, 4096);
+
+  RpcMmapRequest map_request{};
+  map_request.length = 4096;
+  map_request.prot = PROT_READ | PROT_WRITE;
+  map_request.flags = MAP_SHARED;
+  map_request.offset = allocation.mmap_offset;
+  request.opcode = RPC_MMAP;
+  request.request_id = 44;
+  request.payload_bytes = sizeof(map_request);
+  ASSERT_TRUE(rpc_send_exact(client.get(), &request, sizeof(request)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &map_request, sizeof(map_request)));
+  received_fd = -1;
+  num_fds = 1;
+  ASSERT_EQ(rpc_recv_msg(client.get(), &response, sizeof(response), &received_fd, &num_fds),
+            sizeof(response));
+  util::UniqueHandle mapping_fd(received_fd);
+  ASSERT_EQ(response.result, 0);
+  EXPECT_EQ(response.request_id, 44);
+  ASSERT_EQ(num_fds, 1);
+  ASSERT_GE(mapping_fd.get(), 0);
+  ASSERT_EQ(response.payload_bytes, sizeof(RpcMmapResponse));
+  RpcMmapResponse map_response{};
+  ASSERT_TRUE(rpc_recv_exact(client.get(), &map_response, sizeof(map_response)));
+  EXPECT_EQ(map_response.backing.offset, backing.offset);
+  EXPECT_EQ(map_response.backing.size, backing.size);
   server.stop();
   EXPECT_EQ(server.status(), RJ_DAEMON_STATUS_STOPPED);
   EXPECT_EQ(state->live_processes, 0);

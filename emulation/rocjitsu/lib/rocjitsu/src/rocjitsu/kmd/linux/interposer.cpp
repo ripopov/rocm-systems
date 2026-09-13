@@ -5113,9 +5113,6 @@ static void *mmap_impl(void *addr, size_t length, int prot, int flags, int fd, o
       if (lookup == RemoteDriver::MemfdLookup::kFound) {
         // memfd_out is a caller-owned dup; close it once we are done. Its
         // validity is independent of a concurrent RemoteDriver teardown/close.
-        auto total = static_cast<off_t>(length) + memfd_offset;
-        [[maybe_unused]] auto ft_rc = ftruncate(memfd_out, total);
-        fallocate(memfd_out, 0, memfd_offset, static_cast<off_t>(length));
         auto *raw = with_host_mapping_held([&] {
           return InterposerContext::real().mmap(
               addr, length, prot, (flags & ~MAP_ANONYMOUS) | MAP_SHARED, memfd_out, memfd_offset);

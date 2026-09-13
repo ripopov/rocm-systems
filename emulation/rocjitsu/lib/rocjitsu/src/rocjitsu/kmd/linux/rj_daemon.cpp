@@ -217,9 +217,6 @@ public:
   rj_status_t unmap(uint32_t process, rj_vm_unmap_t *request) override {
     return rj_vm_device_unmap_as(vm, process, request);
   }
-  rj_status_t shared_mem(uint32_t process, uint64_t offset, rj_handle_t *handle) override {
-    return rj_vm_get_shared_mem_as(vm, process, offset, handle);
-  }
   rj_status_t execute(uint32_t process, rj_vm_cmd_t *request) override {
     return rj_vm_execute_as(vm, process, request);
   }

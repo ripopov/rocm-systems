@@ -1807,6 +1807,10 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
 
   auto &alloc = it->second;
 
+  if (length == 0 || length > alloc.size) {
+    errno = EINVAL;
+    return MAP_FAILED;
+  }
   if (daemon_mode_ && alloc.memfd >= 0 && alloc.host_ptr != nullptr)
     return alloc.host_ptr;
 
@@ -1814,12 +1818,6 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
   bool host_ptr_owned = true;
 
   if (alloc.memfd >= 0) {
-    if (length > alloc.size) {
-      if (ftruncate(alloc.memfd, static_cast<off_t>(length)) != 0) {
-        errno = ENOMEM;
-        return MAP_FAILED;
-      }
-    }
     if (alloc.user_va && (flags & MAP_FIXED) && addr != nullptr) {
       auto prot_rc = safe_mprotect(addr, length, PROT_READ | PROT_WRITE);
       if (prot_rc == 0) {
@@ -1828,8 +1826,9 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
         std::vector<uint8_t> page_resident(num_pages);
         auto mc_rc = mincore(addr, length, page_resident.data());
 
-        auto *temp_mapping = static_cast<uint8_t *>(
-            safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, alloc.memfd, 0));
+        auto *temp_mapping =
+            static_cast<uint8_t *>(safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, alloc.memfd,
+                                             static_cast<off_t>(alloc.memfd_offset)));
         if (temp_mapping != MAP_FAILED) {
           if (mc_rc == 0) {
             auto *source = static_cast<uint8_t *>(addr);
@@ -1849,7 +1848,8 @@ void *SimulatedKfd::dispatch_mmap(KfdProcess &proc, void *addr, size_t length, i
     int mflags = MAP_SHARED;
     if (flags & MAP_FIXED)
       mflags |= MAP_FIXED;
-    host_ptr = safe_mmap(addr, length, prot, mflags, alloc.memfd, 0);
+    host_ptr =
+        safe_mmap(addr, length, prot, mflags, alloc.memfd, static_cast<off_t>(alloc.memfd_offset));
     if (host_ptr == MAP_FAILED)
       return MAP_FAILED;
   } else {
@@ -2867,6 +2867,7 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
   uint64_t alloc_size = 0;
   uint32_t alloc_flags = 0;
   uint32_t alloc_gpu_id = 0;
+  uint64_t backing_offset = 0;
   int dup_fd = -1;
 
   {
@@ -2933,6 +2934,7 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc_size = alloc.size;
     alloc_flags = alloc.flags;
     alloc_gpu_id = alloc.gpu_id;
+    backing_offset = alloc.memfd_offset;
     dup_fd = safe_fcntl(alloc.memfd, F_DUPFD_CLOEXEC, 0);
   }
 
@@ -2948,6 +2950,7 @@ int SimulatedKfd::ipc_export_handle_ioctl(KfdProcess &proc, void *arg) {
   IpcObject obj{};
   std::memcpy(obj.share_handle, key.words, sizeof(key.words));
   obj.backing_memfd = dup_fd;
+  obj.backing_offset = backing_offset;
   obj.allocation_size = alloc_size;
   obj.allocation_flags = alloc_flags;
   obj.source_gpu_id = alloc_gpu_id;
@@ -2975,6 +2978,7 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
   uint64_t alloc_size = 0;
   uint32_t alloc_flags = 0;
   uint32_t source_gpu_id = 0;
+  uint64_t backing_offset = 0;
 
   {
     std::lock_guard<std::mutex> lk(ipc_mutex_);
@@ -2984,12 +2988,15 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc_size = it->second.allocation_size;
     alloc_flags = it->second.allocation_flags;
     source_gpu_id = it->second.source_gpu_id;
+    backing_offset = it->second.backing_offset;
     dup_fd = safe_fcntl(it->second.backing_memfd, F_DUPFD_CLOEXEC, 0);
   }
 
   if (args->gpu_id != 0 && args->gpu_id != source_gpu_id) {
     util::Logger::vm("ipc_import: gpu_id mismatch: requested=", args->gpu_id,
                      " source=", source_gpu_id);
+    if (dup_fd >= 0)
+      libc_passthrough().close(dup_fd);
     return -EINVAL;
   }
 
@@ -3001,7 +3008,8 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
     owned_fds_.insert(dup_fd);
   }
 
-  auto *host_ptr = safe_mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE, MAP_SHARED, dup_fd, 0);
+  auto *host_ptr = safe_mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE, MAP_SHARED, dup_fd,
+                             static_cast<off_t>(backing_offset));
   if (host_ptr == MAP_FAILED) {
     {
       std::lock_guard<std::mutex> flk(owned_fds_mutex_);
@@ -3031,6 +3039,7 @@ int SimulatedKfd::ipc_import_handle_ioctl(KfdProcess &proc, void *arg) {
     alloc.host_ptr = host_ptr;
     alloc.host_ptr_owned = true;
     alloc.memfd = dup_fd;
+    alloc.memfd_offset = backing_offset;
     alloc.gpu_id = source_gpu_id;
     alloc.imported = true;
     proc.allocations_[handle] = alloc;
@@ -4949,18 +4958,37 @@ int SimulatedKfd::get_mmap_memfd(off_t offset) const {
   return get_mmap_memfd(local_process_id_, offset);
 }
 
-int SimulatedKfd::get_mmap_memfd(uint32_t process_id, off_t offset) const {
+int SimulatedKfd::get_mmap_memfd(uint32_t process_id, off_t offset, uint64_t *backing_offset,
+                                 uint64_t *backing_size) const {
+  if (backing_offset)
+    *backing_offset = 0;
+  if (backing_size)
+    *backing_size = 0;
   auto p = find_process(process_id);
   if (!p)
     return -1;
-  return dispatch_get_mmap_memfd(*p, offset);
+  return dispatch_get_mmap_memfd(*p, offset, backing_offset, backing_size);
 }
 
-int SimulatedKfd::dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const {
+int SimulatedKfd::dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset, uint64_t *backing_offset,
+                                          uint64_t *backing_size) const {
+  auto backing = [&](int fd, uint64_t file_offset = 0, uint64_t size = 0) {
+    if (fd >= 0 && size == 0) {
+      struct stat st{};
+      if (safe_fstat(fd, &st) != 0 || st.st_size < 0)
+        return -1;
+      size = static_cast<uint64_t>(st.st_size);
+    }
+    if (backing_offset)
+      *backing_offset = file_offset;
+    if (backing_size)
+      *backing_size = size;
+    return fd;
+  };
   uint64_t type = static_cast<uint64_t>(offset) & KFD_MMAP_TYPE_MASK;
 
   if (type == KFD_MMAP_TYPE_EVENTS)
-    return proc.event_state_.backing_fd();
+    return backing(proc.event_state_.backing_fd());
 
   if (type == KFD_MMAP_TYPE_DOORBELL) {
     uint64_t encoded_gpu =
@@ -4973,7 +5001,7 @@ int SimulatedKfd::dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const 
     if (gs.doorbell_memfd >= 0) {
       util::Logger::cp("MEMFD_LOOKUP: pid=", proc.process_id(),
                        " DOORBELL canonical gpu_id=", db_gpu_id, " memfd=", gs.doorbell_memfd);
-      return gs.doorbell_memfd;
+      return backing(gs.doorbell_memfd);
     }
     // Compatibility fallback for callers that query the backing before the
     // mmap path has published the canonical descriptor.
@@ -4981,7 +5009,7 @@ int SimulatedKfd::dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const 
       if ((alloc.flags & KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL) && alloc.gpu_id == db_gpu_id) {
         util::Logger::cp("MEMFD_LOOKUP: pid=", proc.process_id(), " DOORBELL match handle=", handle,
                          " gpu_id=", db_gpu_id, " memfd=", alloc.memfd);
-        return alloc.memfd;
+        return backing(alloc.memfd, alloc.memfd_offset, alloc.size);
       }
     }
     util::Logger::cp("MEMFD_LOOKUP: pid=", proc.process_id(),
@@ -4994,7 +5022,7 @@ int SimulatedKfd::dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const 
   std::lock_guard<std::mutex> lock(proc.alloc_mutex_);
   auto it = proc.allocations_.find(handle);
   if (it != proc.allocations_.end())
-    return it->second.memfd;
+    return backing(it->second.memfd, it->second.memfd_offset, it->second.size);
 
   return -1;
 }
