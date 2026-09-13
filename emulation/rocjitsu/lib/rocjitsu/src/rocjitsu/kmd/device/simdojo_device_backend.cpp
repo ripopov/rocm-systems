@@ -10,6 +10,36 @@
 
 namespace rocjitsu::kmd {
 
+void SimdojoDeviceBackend::set_memory_fault_reporter(MemoryFaultReporter *reporter) {
+  if (auto *memory = soc_.memory())
+    memory->set_memory_fault_reporter(reporter);
+}
+
+int SimdojoDeviceBackend::register_process(KfdProcess &process, bool passthrough) {
+  if (auto *memory = soc_.memory()) {
+    memory->register_process(process.process_id(), &process.page_table_, &process.page_table_mutex_,
+                             process.page_table_generation(), process.page_table_request_mutex());
+    if (passthrough)
+      memory->set_passthrough(true);
+  }
+  return 0;
+}
+
+void SimdojoDeviceBackend::unregister_process(uint32_t process) {
+  if (auto *memory = soc_.memory())
+    memory->unregister_process(process);
+}
+
+void SimdojoDeviceBackend::set_process_client_pid(uint32_t process, int32_t client_pid) {
+  if (auto *memory = soc_.memory())
+    memory->set_process_client_pid(process, client_pid);
+}
+
+void SimdojoDeviceBackend::set_process_mem_fd(uint32_t process, int fd) {
+  if (auto *memory = soc_.memory())
+    memory->set_process_mem_fd(process, fd);
+}
+
 std::optional<uint32_t> SimdojoDeviceBackend::queue_xcc(uint32_t ordinal) const {
   if (!soc_.assign_queue_owner_cp(ordinal))
     return std::nullopt;

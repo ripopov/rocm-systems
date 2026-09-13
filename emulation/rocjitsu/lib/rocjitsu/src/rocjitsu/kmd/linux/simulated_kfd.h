@@ -138,7 +138,7 @@ public:
   /// device that faulted: the runtime maps gpu_id to a node and surfaces it, so
   /// a shared reporter that guessed would misattribute a fault from any device
   /// but the first.
-  class GpuFaultReporter : public amdgpu::MemoryFaultReporter {
+  class GpuFaultReporter : public kmd::MemoryFaultReporter {
   public:
     GpuFaultReporter(SimulatedKfd *driver, uint32_t gpu_id, std::shared_ptr<KfdProcess> process)
         : driver_(driver), gpu_id_(gpu_id), process_(std::move(process)) {}

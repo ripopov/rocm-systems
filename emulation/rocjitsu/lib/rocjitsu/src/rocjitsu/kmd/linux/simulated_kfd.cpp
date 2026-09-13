@@ -944,8 +944,8 @@ void SimulatedKfd::report_memory_fault(const std::shared_ptr<KfdProcess> &proc, 
   // may not have would send the runtime after the wrong problem. It does not
   // set `imprecise` either -- that reports an inexact faulting address, which
   // is not what is uncertain here.
-  fault.not_present = cause == amdgpu::MemoryFaultCause::NotPresent;
-  fault.read_only = cause == amdgpu::MemoryFaultCause::ReadOnly;
+  fault.not_present = cause == kmd::MemoryFaultCause::NotPresent;
+  fault.read_only = cause == kmd::MemoryFaultCause::ReadOnly;
 
   // Reporting is best effort by design: a process that never created a
   // memory-exception event has no channel for this, exactly as on hardware,
