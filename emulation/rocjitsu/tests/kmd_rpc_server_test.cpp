@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
+#include "rocjitsu/kmd/linux/callback_dispatcher.h"
 #include "rocjitsu/kmd/linux/kfd_ioctl_utils.h"
 #include "rocjitsu/kmd/linux/kmd_rpc_server.h"
 #include "scoped_temp.h"
@@ -21,7 +22,7 @@ namespace {
 
 // Deliberately has no simulator: linking this test verifies the transport's
 // independence from the VM, ISA execution, and configuration libraries.
-class BlockingDevice final : public KmdRpcDevice {
+class BlockingDevice : public KmdRpcDevice {
 public:
   std::atomic<unsigned> opens{0};
   std::atomic<unsigned> closes{0};
@@ -196,6 +197,66 @@ TEST_F(KmdRpcServerTest, QuiescedListenerCannotBeStarted) {
   EXPECT_LT(connect_client().get(), 0);
   server.stop();
   EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST_F(KmdRpcServerTest, OwnerDispatchesCleanupWhileTransportJoinsBlockedClients) {
+  CallbackDispatcher dispatcher;
+  const auto owner = std::this_thread::get_id();
+  class OwnerDevice final : public BlockingDevice {
+  public:
+    OwnerDevice(CallbackDispatcher &dispatcher, std::thread::id owner)
+        : dispatcher_(dispatcher), owner_(owner) {}
+    rj_status_t open(rj_client_pid_t pid, uint32_t *process) override {
+      return dispatcher_.invoke([&] {
+        EXPECT_EQ(std::this_thread::get_id(), owner_);
+        return BlockingDevice::open(pid, process);
+      });
+    }
+    rj_status_t close(uint32_t process) override {
+      return dispatcher_.invoke([&] {
+        EXPECT_EQ(std::this_thread::get_id(), owner_);
+        return BlockingDevice::close(process);
+      });
+    }
+    void close_all() override {
+      dispatcher_.invoke([&] {
+        EXPECT_EQ(std::this_thread::get_id(), owner_);
+        BlockingDevice::close_all();
+      });
+    }
+
+  private:
+    CallbackDispatcher &dispatcher_;
+    std::thread::id owner_;
+  } embedded_device{dispatcher, owner};
+  KmdRpcServer embedded_server{embedded_device};
+  ASSERT_EQ(embedded_server.bind(path.c_str()), ROCJITSU_STATUS_SUCCESS);
+  ASSERT_EQ(embedded_server.start(), ROCJITSU_STATUS_SUCCESS);
+  auto client = connect_client();
+  ASSERT_GE(client.get(), 0);
+  dispatcher.run_while_dispatching([&] { handshake(client.get()); });
+
+  kfd_ioctl_wait_events_args args{};
+  args.timeout = 0xFFFFFFFFu;
+  RpcIoctlRequest request{};
+  request.ioctl_cmd = AMDKFD_IOC_WAIT_EVENTS;
+  request.args_bytes = sizeof(args);
+  RpcHeader header{};
+  header.opcode = RPC_IOCTL;
+  header.payload_bytes = sizeof(request) + sizeof(args);
+  ASSERT_TRUE(rpc_send_exact(client.get(), &header, sizeof(header)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &request, sizeof(request)));
+  ASSERT_TRUE(rpc_send_exact(client.get(), &args, sizeof(args)));
+  {
+    std::unique_lock lock(embedded_device.mutex);
+    ASSERT_TRUE(embedded_device.changed.wait_for(lock, std::chrono::seconds(5),
+                                                 [&] { return embedded_device.entered; }));
+  }
+  embedded_server.stop_accepting();
+  dispatcher.run_while_dispatching([&] { embedded_server.stop(); });
+  EXPECT_EQ(embedded_server.status(), RJ_DAEMON_STATUS_STOPPED);
+  EXPECT_EQ(embedded_device.opens.load(), 1u);
+  EXPECT_EQ(embedded_device.closes.load(), 1u);
 }
 
 } // namespace
