@@ -25,6 +25,9 @@ class TestDeviceBackend : public rocjitsu::kmd::DeviceBackend {
 public:
   int registration_result = 0;
   int queue_result = 0;
+  int update_result = 0;
+  unsigned update_calls = 0;
+  uint32_t last_percentage = 0;
   int live_processes = 0;
   rocjitsu::kmd::DeviceMemory *memory_allocator = nullptr;
   std::vector<std::string> *lifecycle = nullptr;
@@ -50,7 +53,11 @@ public:
   void set_process_mem_fd(uint32_t, int) override {}
   std::optional<uint32_t> queue_xcc(uint32_t) const override { return 0; }
   int create_queue(const rocjitsu::kmd::QueueDescriptor &) override { return queue_result; }
-  void update_queue(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t) override {}
+  int update_queue(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t percentage) override {
+    ++update_calls;
+    last_percentage = percentage;
+    return update_result;
+  }
   void destroy_queue(uint32_t, uint32_t) override {
     if (lifecycle)
       lifecycle->push_back("destroy_queue");
@@ -481,6 +488,47 @@ TEST(KmdCoreTest, DeviceQueueFailureReleasesDoorbellReservation) {
   EXPECT_EQ(args.doorbell_offset, failed_doorbell);
   EXPECT_TRUE(process->gpu(0).free_doorbell_offsets.empty());
   EXPECT_EQ(driver.close(process_id), 0);
+}
+
+TEST(KmdCoreTest, QueueUpdateTargetsOwnerAndPreservesSnapshotOnFailure) {
+  auto first = std::make_unique<TestDeviceBackend>();
+  auto second = std::make_unique<TestDeviceBackend>();
+  auto *other = first.get();
+  auto *owner = second.get();
+  std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(first)});
+  devices.push_back({8, std::move(second)});
+  rocjitsu::SimulatedKfd driver(std::move(devices));
+  const auto pid = driver.open_process();
+  ASSERT_NE(pid, 0);
+  kfd_ioctl_create_queue_args create{};
+  create.gpu_id = 8;
+  create.queue_type = KFD_IOC_QUEUE_TYPE_COMPUTE_AQL;
+  create.ring_base_address = 0x10000;
+  create.ring_size = 4096;
+  ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_CREATE_QUEUE, &create), 0);
+  auto process = driver.find_process(pid);
+  kfd_ioctl_update_queue_args update{};
+  update.queue_id = create.queue_id;
+  update.ring_base_address = 0x20000;
+  update.ring_size = 8192;
+  update.queue_percentage = 50;
+  owner->update_result = -EBUSY;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UPDATE_QUEUE, &update), -EBUSY);
+  EXPECT_EQ(process->queue_snapshot_map_.at(create.queue_id).ring_base_address, 0x10000u);
+  EXPECT_EQ(process->queue_snapshot_map_.at(create.queue_id).ring_size, 4096u);
+  EXPECT_EQ(other->update_calls, 0u);
+  EXPECT_EQ(owner->update_calls, 1u);
+  EXPECT_EQ(owner->last_percentage, 50u);
+  owner->update_result = 0;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UPDATE_QUEUE, &update), 0);
+  EXPECT_EQ(process->queue_snapshot_map_.at(create.queue_id).ring_base_address, 0x20000u);
+  EXPECT_EQ(process->queue_snapshot_map_.at(create.queue_id).ring_size, 8192u);
+  update.queue_id = 0xFFFFFFFF;
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UPDATE_QUEUE, &update), -EINVAL);
+  EXPECT_EQ(owner->update_calls, 2u);
+  EXPECT_EQ(other->update_calls, 0u);
+  EXPECT_EQ(driver.close(pid), 0);
 }
 
 TEST(KmdCoreTest, SharedCommandExecutorValidatesInlinePayload) {

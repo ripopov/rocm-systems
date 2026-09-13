@@ -24,7 +24,7 @@ public:
   void set_process_mem_fd(uint32_t process, int fd) override;
   std::optional<uint32_t> queue_xcc(uint32_t ordinal) const override;
   int create_queue(const QueueDescriptor &queue) override;
-  void update_queue(uint32_t process, uint32_t queue, uint64_t ring, uint32_t size,
+  int update_queue(uint32_t process, uint32_t queue, uint64_t ring, uint32_t size,
                     uint32_t percentage) override;
   void destroy_queue(uint32_t process, uint32_t queue) override;
   void set_doorbell_base(uint32_t process, void *base) override;

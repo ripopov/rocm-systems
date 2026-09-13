@@ -176,11 +176,12 @@ int SimdojoDeviceBackend::create_queue(const QueueDescriptor &queue) {
   return 0;
 }
 
-void SimdojoDeviceBackend::update_queue(uint32_t process, uint32_t queue, uint64_t ring,
+int SimdojoDeviceBackend::update_queue(uint32_t process, uint32_t queue, uint64_t ring,
                                         uint32_t size, uint32_t percentage) {
   soc_.for_each_cp([&](amdgpu::CommandProcessor *cp) {
     cp->update_queue(queue, process, ring, size, percentage);
   });
+  return 0;
 }
 
 void SimdojoDeviceBackend::destroy_queue(uint32_t process, uint32_t queue) {

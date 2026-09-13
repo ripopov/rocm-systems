@@ -2541,10 +2541,22 @@ int SimulatedKfd::create_queue_ioctl(KfdProcess &proc, void *arg) {
 
 int SimulatedKfd::update_queue_ioctl(KfdProcess &proc, void *arg) {
   auto *args = static_cast<kfd_ioctl_update_queue_args *>(arg);
-  for (auto &g : gpus_)
-    if (g.backend)
-      g.backend->update_queue(proc.process_id(), args->queue_id, args->ring_base_address,
-                              args->ring_size, args->queue_percentage);
+  uint32_t ordinal;
+  {
+    std::lock_guard<std::mutex> lk(proc.alloc_mutex_);
+    auto it = proc.queue_doorbell_map_.find(args->queue_id);
+    if (it == proc.queue_doorbell_map_.end())
+      return -EINVAL;
+    ordinal = it->second.gpu_ordinal;
+  }
+  auto &backend = gpus_[ordinal].backend;
+  if (!backend)
+    return -ENOTSUP;
+  const int status = backend->update_queue(proc.process_id(), args->queue_id,
+                                          args->ring_base_address, args->ring_size,
+                                          args->queue_percentage);
+  if (status)
+    return status < 0 ? status : -EPROTO;
   {
     std::lock_guard<std::mutex> lk(proc.alloc_mutex_);
     if (auto it = proc.queue_snapshot_map_.find(args->queue_id);
