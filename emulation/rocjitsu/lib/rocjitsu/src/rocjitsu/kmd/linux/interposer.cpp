@@ -4738,7 +4738,14 @@ RJ_INTERPOSER_EXPORT int dup2(int oldfd, int newfd) {
   if (!rj_owns_interposer_state()) {
     if (rj_child_refuses_fd(oldfd))
       return -1;
+#ifdef SYS_dup2
     return static_cast<int>(syscall(SYS_dup2, oldfd, newfd));
+#else
+    // dup3 rejects equal descriptors; dup2 must validate and return the fd.
+    if (oldfd == newfd)
+      return syscall(SYS_fcntl, oldfd, F_GETFD) < 0 ? -1 : oldfd;
+    return static_cast<int>(syscall(SYS_dup3, oldfd, newfd, 0));
+#endif
   }
   // dup2(fd, fd) is a POSIX no-op that leaves the descriptor live; mutating
   // tracking would drop a still-open ref. Forward without touching tracking.
