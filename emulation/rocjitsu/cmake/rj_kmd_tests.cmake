@@ -6,6 +6,22 @@ target_link_libraries(kmd_core_tests PRIVATE rocjitsu_kmd_core GTest::gtest_main
 rj_configure_target(kmd_core_tests PRIVATE_INCLUDES WARNINGS)
 rj_add_gtest_tests(kmd_core_tests)
 
+add_executable(kmd_embedding_tests kmd_embedding_test.cpp)
+target_link_libraries(kmd_embedding_tests PRIVATE rocjitsu_kmd_server util Threads::Threads GTest::gtest_main)
+rj_configure_target(kmd_embedding_tests PRIVATE_INCLUDES WARNINGS)
+if(RJ_INSTALL_TESTS)
+    if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+        set(_kmd_embedding_rpath "${CMAKE_INSTALL_LIBDIR}")
+    else()
+        file(RELATIVE_PATH _kmd_embedding_lib_relative
+            "${CMAKE_INSTALL_FULL_DATADIR}/rocjitsu/tests/bin"
+            "${CMAKE_INSTALL_FULL_LIBDIR}")
+        set(_kmd_embedding_rpath "$ORIGIN/${_kmd_embedding_lib_relative}")
+    endif()
+    set_property(TARGET kmd_embedding_tests PROPERTY INSTALL_RPATH "${_kmd_embedding_rpath}")
+endif()
+rj_add_gtest_tests(kmd_embedding_tests)
+
 add_executable(kmd_rpc_server_tests
     kmd_rpc_server_test.cpp
     callback_dispatcher_test.cpp
