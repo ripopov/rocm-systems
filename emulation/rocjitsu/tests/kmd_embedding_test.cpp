@@ -6,11 +6,11 @@
 #include "util/unique_handle.h"
 
 #include <future>
-#include <thread>
 #include <gtest/gtest.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <thread>
 
 namespace rocjitsu {
 namespace {
@@ -21,7 +21,7 @@ template <typename T> T abi() {
   return value;
 }
 
-class KmdEmbeddingTest : public testing::Test {
+class KmdEmbeddingTest : public testing::TestWithParam<uint32_t> {
 protected:
   test::ScopedTempDirectory directory{"rj-c-embedding-"};
   const std::thread::id owner = std::this_thread::get_id();
@@ -71,7 +71,7 @@ protected:
     info.architecture = 3; // public rj_code_arch_t CDNA4 value
     info.gpu_id = 7;
     info.gfx_target_version = 90500;
-    info.num_xcc = 1;
+    info.num_xcc = GetParam();
     info.drm_render_minor = 128;
     info.wave_front_size = 64;
     info.simd_per_cu = 4;
@@ -111,7 +111,7 @@ protected:
   }
 };
 
-TEST_F(KmdEmbeddingTest, SharedLibraryServesHandshakeAndDestroysLiveClientOnOwner) {
+TEST_P(KmdEmbeddingTest, SharedLibraryServesHandshakeAndDestroysLiveClientOnOwner) {
   char error[256]{};
   ASSERT_EQ(rj_kmd_server_listen(server, error, sizeof(error)), 0) << error;
   util::UniqueHandle client(::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
@@ -151,7 +151,7 @@ TEST_F(KmdEmbeddingTest, SharedLibraryServesHandshakeAndDestroysLiveClientOnOwne
   EXPECT_FALSE(std::filesystem::exists(socket_path));
 }
 
-TEST_F(KmdEmbeddingTest, RejectsWrongThreadAndInvalidDescriptors) {
+TEST_P(KmdEmbeddingTest, RejectsWrongThreadAndInvalidDescriptors) {
   auto wrong_thread = std::async(std::launch::async, [&] {
     size_t count = 0;
     EXPECT_EQ(rj_kmd_server_poll_fds(server, nullptr, &count), -EPERM);
@@ -167,6 +167,8 @@ TEST_F(KmdEmbeddingTest, RejectsWrongThreadAndInvalidDescriptors) {
   EXPECT_EQ(rj_kmd_server_poll_fds(server, nullptr, &count), 0);
   EXPECT_EQ(count, 1u);
 }
+
+INSTANTIATE_TEST_SUITE_P(Topology, KmdEmbeddingTest, testing::Values(1u, 8u));
 
 } // namespace
 } // namespace rocjitsu

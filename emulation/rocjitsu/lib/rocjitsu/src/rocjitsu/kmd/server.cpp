@@ -168,9 +168,9 @@ int32_t rj_kmd_server_create(const rj_kmd_device_info_t *info, const rj_kmd_serv
         info->architecture == ROCJITSU_CODE_ARCH_RV32I ||
         info->architecture == ROCJITSU_CODE_ARCH_RV64I)
       return -ENOTSUP;
-    // The embedding queue interface currently describes a single XCC.
-    if (info->num_xcc != 1)
-      return -ENOTSUP;
+    // XCC count describes topology, not an embedding restriction. The host
+    // owns placement of each hardware queue; simdojo's per-XCC CP objects
+    // are not part of the external-device contract.
     auto server = std::make_unique<rj_kmd_server>();
     server->socket_path = config->socket_path;
     server->diagnostic = config->diagnostic;
