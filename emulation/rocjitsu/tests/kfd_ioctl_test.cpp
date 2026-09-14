@@ -3578,6 +3578,30 @@ void check_allocation_slice(bool userptr) {
   }
   EXPECT_GE(::fcntl(lookup_fd, F_GETFD), 0);
   ASSERT_EQ(::munmap(mapped, 4096), 0);
+  kfd_ioctl_free_memory_of_gpu_args free_args{};
+  free_args.handle = allocation.handle;
+  header.opcode = rocjitsu::RPC_IOCTL;
+  header.payload_bytes = sizeof(free_args);
+  if (userptr) {
+    header.result = -EBUSY;
+    ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
+    ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
+    ASSERT_EQ(rd.ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), -EBUSY);
+    const uint64_t still_shared = marker + 3;
+    ASSERT_EQ(::pwrite(backing, &still_shared, sizeof(still_shared), 8192), sizeof(still_shared));
+    EXPECT_EQ(*static_cast<uint64_t *>(original), still_shared);
+    *static_cast<uint64_t *>(original) = marker + 2;
+    header.result = 0;
+  }
+  ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
+  ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
+  ASSERT_EQ(rd.ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), 0);
+  if (userptr) {
+    const uint64_t reused = 0xdeadbeef;
+    ASSERT_EQ(::pwrite(backing, &reused, sizeof(reused), 8192), sizeof(reused));
+    EXPECT_EQ(*static_cast<uint64_t *>(original), marker + 2)
+        << "released backend storage must no longer alias caller-owned memory";
+  }
   ASSERT_EQ(::munmap(original, 4096), 0);
   struct stat st{};
   ASSERT_EQ(::fstat(backing, &st), 0);

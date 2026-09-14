@@ -734,6 +734,46 @@ int RemoteDriver::ioctl(unsigned long request, void *arg) {
 
 int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   std::lock_guard<std::mutex> lock(rpc_mutex_);
+  if (request != AMDKFD_IOC_FREE_MEMORY_OF_GPU || protocol_failed_.load())
+    return send_ioctl_locked(request, arg);
+
+  const auto handle = static_cast<kfd_ioctl_free_memory_of_gpu_args *>(arg)->handle;
+  const auto allocation = handle_memfds_.find(handle);
+  if (allocation == handle_memfds_.end() || !allocation->second.userptr_address)
+    return send_ioctl_locked(request, arg);
+
+  // The caller owns USERPTR memory beyond deregistration. Detach it before
+  // FREE allows a device allocator to reuse the shared backing. A temporary
+  // anonymous mapping keeps the original intact if allocation/remapping fails.
+  const auto backing = allocation->second;
+  auto *address = reinterpret_cast<void *>(backing.userptr_address);
+  auto *copy = safe_mmap(nullptr, backing.userptr_size, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (copy == MAP_FAILED)
+    return -errno;
+  std::memcpy(copy, address, backing.userptr_size);
+  if (syscall(SYS_mremap, copy, backing.userptr_size, backing.userptr_size,
+              MREMAP_MAYMOVE | MREMAP_FIXED, address) == -1) {
+    const int error = errno;
+    syscall(SYS_munmap, copy, backing.userptr_size);
+    return -error;
+  }
+
+  const int result = send_ioctl_locked(request, arg);
+  // A rejected FREE still owns device storage and must remain shared for a
+  // retry. A poisoned connection cannot be reused; retain the private snapshot
+  // instead of reconnecting the application to possibly reclaimed storage.
+  if (result != 0 && !protocol_failed_.load()) {
+    if (safe_mmap(address, backing.userptr_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                  backing.fd, backing.offset) == MAP_FAILED) {
+      protocol_failed_.store(true);
+      return -EPROTO;
+    }
+  }
+  return result;
+}
+
+int RemoteDriver::send_ioctl_locked(unsigned long request, void *arg) {
   // The stream is misaligned past a rejected reply; every later header would be
   // parsed out of stale bytes. Fail closed instead of returning bogus results.
   // Tested under rpc_mutex_, not before it: a thread that read the flag first
@@ -1351,6 +1391,11 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
                               ? userptr_address
                               : alloc_args->va_addr,
                           alloc_args->size, received_fds[0]);
+      if (alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) {
+        auto &backing = handle_memfds_.at(alloc_args->handle);
+        backing.userptr_address = userptr_address;
+        backing.userptr_size = alloc_args->size;
+      }
     }
   }
 
