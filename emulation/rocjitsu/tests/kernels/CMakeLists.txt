@@ -51,12 +51,12 @@ rj_add_device_kernel(multikernel_indirect_branch_part0 gfx950)
 rj_add_device_kernel(multikernel_indirect_branch_part1 gfx950)
 
 # gfx1250 was added after older installed ROCm compilers. Probe the selected
-# compiler before registering this fixture so a checkout remains buildable with
-# an otherwise supported toolchain. `-nogpulib` keeps the probe independent of
-# device-library packaging; the real custom command still uses ROCM_PATH.
+# compiler and device libraries before registering this fixture. Some
+# distributions ship a compiler that recognizes gfx1250 but older device
+# bitcode; recognizing the target alone does not make the fixture buildable.
 execute_process(
     COMMAND
-        ${AMDCXX} -x hip --offload-arch=gfx1250 -nogpulib --cuda-device-only -c
+        ${AMDCXX} -x hip --offload-arch=gfx1250 --rocm-path=${ROCM_PATH} --cuda-device-only -c
         /dev/null -o /dev/null
     RESULT_VARIABLE RJ_AMDCXX_SUPPORTS_GFX1250
     OUTPUT_QUIET
@@ -73,7 +73,7 @@ if(RJ_AMDCXX_SUPPORTS_GFX1250 EQUAL 0)
 else()
     message(
         STATUS
-        "gfx1250 device kernel tests disabled (selected amdclang++ does not support gfx1250)"
+        "gfx1250 device kernel tests disabled (selected compiler/device libraries do not support gfx1250)"
     )
 endif()
 
