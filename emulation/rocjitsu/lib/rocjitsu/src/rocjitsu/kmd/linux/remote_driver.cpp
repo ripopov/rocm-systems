@@ -747,6 +747,15 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   if (!validate_ioctl_arg_size(request, arg, arg_size))
     return -EINVAL;
 
+  // USERPTR's input mmap_offset is the CPU address, not the GPU VA. The
+  // response replaces it with an mmap token, so retain it before the RPC.
+  uint64_t userptr_address = 0;
+  if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU) {
+    const auto *allocation = static_cast<const kfd_ioctl_alloc_memory_of_gpu_args *>(arg);
+    if (allocation->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR)
+      userptr_address = allocation->mmap_offset;
+  }
+
   // Save original embedded pointers before serialization. The daemon rewrites
   // these to point at its own buffer; we must restore the client-side originals
   // before copying inline response data back.
@@ -1358,10 +1367,13 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
       if (alloc_args->size > shared_backing.size || handle_memfds_.contains(alloc_args->handle))
         return poison_reply();
       if ((alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) &&
-          !promote_userptr(alloc_args->va_addr, alloc_args->size, received_fds[0]))
+          !promote_userptr(userptr_address, alloc_args->size, received_fds[0]))
         return poison_reply();
-      register_allocation(alloc_args->handle, alloc_args->va_addr, alloc_args->size,
-                          received_fds[0]);
+      register_allocation(alloc_args->handle,
+                          (alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR)
+                              ? userptr_address
+                              : alloc_args->va_addr,
+                          alloc_args->size, received_fds[0]);
     }
   }
 

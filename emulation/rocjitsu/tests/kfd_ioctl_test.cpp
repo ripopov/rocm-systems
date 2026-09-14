@@ -4231,7 +4231,8 @@ void check_allocation_slice(bool userptr) {
   kfd_ioctl_alloc_memory_of_gpu_args allocation{};
   allocation.handle = 42;
   allocation.mmap_offset = allocation.handle << 12;
-  allocation.va_addr = reinterpret_cast<uint64_t>(original);
+  // USERPTR can register a CPU buffer at a different GPU virtual address.
+  allocation.va_addr = userptr ? 0x123400000000ULL : reinterpret_cast<uint64_t>(original);
   allocation.size = 4096;
   allocation.flags = userptr ? KFD_IOC_ALLOC_MEM_FLAGS_USERPTR : KFD_IOC_ALLOC_MEM_FLAGS_GTT;
   rocjitsu::RpcHeader header{};
@@ -4244,6 +4245,8 @@ void check_allocation_slice(bool userptr) {
   std::memcpy(response.data() + sizeof(header) + sizeof(slice), &allocation, sizeof(allocation));
   ASSERT_EQ(rocjitsu::rpc_send_msg(sv[1], response.data(), response.size(), &backing, 1),
             static_cast<ssize_t>(response.size()));
+  if (userptr)
+    allocation.mmap_offset = reinterpret_cast<uint64_t>(original);
   ASSERT_EQ(rd.ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
   int lookup_fd = -1;
   off_t lookup_offset = 0;
@@ -4262,6 +4265,10 @@ void check_allocation_slice(bool userptr) {
   auto *mapped = rd.mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, allocation.mmap_offset);
   ASSERT_NE(mapped, MAP_FAILED);
   EXPECT_EQ(*static_cast<uint64_t *>(mapped), marker + (userptr ? 1 : 0));
+  if (userptr) {
+    *static_cast<uint64_t *>(mapped) = marker + 2;
+    EXPECT_EQ(*static_cast<uint64_t *>(original), marker + 2);
+  }
   EXPECT_GE(::fcntl(lookup_fd, F_GETFD), 0);
   ASSERT_EQ(::munmap(mapped, 4096), 0);
   ASSERT_EQ(::munmap(original, 4096), 0);

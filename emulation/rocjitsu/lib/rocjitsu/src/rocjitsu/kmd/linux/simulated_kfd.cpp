@@ -2219,8 +2219,8 @@ int SimulatedKfd::alloc_memory_ioctl(KfdProcess &proc, void *arg) {
     }
     static_cast<void>(backing.release());
   } else if (is_userptr && !daemon_mode_) {
-    alloc.host_ptr = reinterpret_cast<void *>(va);
-    map_to_gpu(proc, va, reinterpret_cast<void *>(va), args->size, alloc_mtype);
+    alloc.host_ptr = reinterpret_cast<void *>(args->mmap_offset);
+    map_to_gpu(proc, va, alloc.host_ptr, args->size, alloc_mtype);
   } else if (daemon_mode_ || !user_provided_va) {
     auto raw_fd = memfd_create("rocjitsu_alloc", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (raw_fd >= 0) {

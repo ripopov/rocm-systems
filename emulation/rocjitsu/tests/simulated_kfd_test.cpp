@@ -106,6 +106,30 @@ protected:
   void SetUp() override { setenv("RJ_CONFIG", CONFIG_PATH.c_str(), 1); }
 };
 
+TEST_F(SimulatedKfdTest, UserptrUsesCpuAddressRatherThanGpuAddress) {
+  auto t = create_test_vm();
+  auto *driver = t.driver();
+  ASSERT_NE(driver, nullptr);
+  ASSERT_GE(driver->open(), 0);
+  auto *cpu = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(cpu, MAP_FAILED);
+  *static_cast<uint32_t *>(cpu) = 17;
+  kfd_ioctl_alloc_memory_of_gpu_args alloc{};
+  alloc.va_addr = 0x123400000000ULL;
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(cpu);
+  alloc.size = 4096;
+  alloc.gpu_id = driver->gpu_id();
+  alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
+  ASSERT_EQ(driver->ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &alloc), 0);
+  ASSERT_NE(t.memory(), nullptr);
+  EXPECT_EQ(t.memory()->read32(alloc.va_addr, driver->local_process_id()), 17);
+  t.memory()->write32(alloc.va_addr, 29, driver->local_process_id());
+  EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
+  EXPECT_EQ(driver->close(), 0);
+  // Registration does not transfer ownership of the application's storage.
+  EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
+  EXPECT_EQ(::munmap(cpu, 4096), 0);
+}
 
 TEST_F(SimulatedKfdTest, CreateDefault) {
   auto t = create_test_vm();
@@ -299,6 +323,7 @@ TEST_F(SimulatedKfdTest, FixedAllocationMmapWaitsForInFlightHostAccesses) {
 
   kfd_ioctl_alloc_memory_of_gpu_args alloc{};
   alloc.va_addr = reinterpret_cast<uint64_t>(target);
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(target);
   alloc.size = page_size;
   alloc.gpu_id = driver->gpu_id();
   alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
@@ -347,6 +372,7 @@ TEST_F(SimulatedKfdTest, AllocationMunmapWaitsForInFlightHostAccesses) {
 
   kfd_ioctl_alloc_memory_of_gpu_args alloc{};
   alloc.va_addr = reinterpret_cast<uint64_t>(target);
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(target);
   alloc.size = page_size;
   alloc.gpu_id = driver->gpu_id();
   alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
