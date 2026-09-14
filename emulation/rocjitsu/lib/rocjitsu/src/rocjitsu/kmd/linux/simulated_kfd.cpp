@@ -2939,6 +2939,12 @@ int SimulatedKfd::get_dmabuf_info_ioctl(KfdProcess &proc, void *arg) {
 }
 
 int SimulatedKfd::svm_ioctl(KfdProcess &proc, void *arg) {
+  // The host-memory simulator can resolve these virtual ranges directly.
+  // Backend-owned storage currently supports explicit KFD allocations only;
+  // recording SVM attributes would falsely promise device-accessible pages.
+  if (std::any_of(gpus_.begin(), gpus_.end(),
+                  [](const auto &gpu) { return gpu.backend && gpu.backend->memory(); }))
+    return -ENOTSUP;
   auto *args = static_cast<kfd_ioctl_svm_args *>(arg);
   auto *attrs = reinterpret_cast<kfd_ioctl_svm_attribute *>(args + 1);
 

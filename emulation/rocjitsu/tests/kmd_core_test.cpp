@@ -135,8 +135,8 @@ TEST(KmdCoreTest, ExplicitTopologyRootIsIsolatedAndDoesNotChangeEnvironment) {
   rocjitsu::test::ScopedTempDirectory first_root{"rj-embedded-topology-first-"};
   rocjitsu::test::ScopedTempDirectory second_root{"rj-embedded-topology-second-"};
   const char *environment = std::getenv("ROCJITSU_RUNTIME_DIR");
-  const std::optional<std::string> before = environment ? std::optional<std::string>(environment)
-                                                       : std::nullopt;
+  const std::optional<std::string> before =
+      environment ? std::optional<std::string>(environment) : std::nullopt;
   rocjitsu::Sysfs first, second;
   rocjitsu::Sysfs::GpuInfo gpu{};
   gpu.gpu_id = 7;
@@ -168,6 +168,32 @@ TEST(KmdCoreTest, ExplicitInvalidTopologyRootDoesNotFallBackToDefaultDirectory) 
   EXPECT_TRUE(topology.path().empty());
   EXPECT_TRUE(topology.drm_path().empty());
   EXPECT_TRUE(std::filesystem::is_regular_file(blocker));
+}
+
+TEST(KmdCoreTest, SvmDoesNotClaimMappingsForBackendOwnedStorage) {
+  for (bool external : {false, true}) {
+    TestDeviceMemory allocator;
+    auto backend = std::make_unique<TestDeviceBackend>();
+    backend->memory_allocator = external ? &allocator : nullptr;
+    std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
+    devices.push_back({7, std::move(backend)});
+    rocjitsu::SimulatedKfd driver(std::move(devices));
+    const auto pid = driver.open_process();
+    ASSERT_NE(pid, 0);
+    auto process = driver.find_process(pid);
+    kfd_ioctl_svm_args args;
+    std::memset(&args, 0, sizeof(args));
+    args.op = KFD_IOCTL_SVM_OP_SET_ATTR;
+    args.start_addr = 0x400000;
+    args.size = 4096;
+    EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_SVM, &args), external ? -ENOTSUP : 0);
+    EXPECT_EQ(process->svm_ranges_.empty(), external);
+    EXPECT_TRUE(process->allocations_.empty());
+    EXPECT_EQ(allocator.state->live, 0);
+    args.op = KFD_IOCTL_SVM_OP_GET_ATTR;
+    EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_SVM, &args), external ? -ENOTSUP : 0);
+    EXPECT_EQ(driver.close(pid), 0);
+  }
 }
 
 TEST(KmdCoreTest, BackendAllocationFailureDoesNotFallBackOrPublishHandles) {
