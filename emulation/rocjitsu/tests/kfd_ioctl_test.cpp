@@ -3519,11 +3519,13 @@ TEST(RemoteDriverBackingTest, MmapCannotExtendBeyondItsSliceIntoAdjacentBacking)
   check_mmap_reply_descriptor_lifetime(true, 0, 8192, 8192);
 }
 
-void check_allocation_slice(bool userptr) {
+enum class AllocationRelease { Free, Close, Destroy };
+
+void check_allocation_slice(bool userptr, AllocationRelease release = AllocationRelease::Free) {
   int sv[2];
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
   const CloseOnScopeExit server_closer{sv[1]};
-  rocjitsu::RemoteDriver rd(sv[0]);
+  auto rd = std::make_unique<rocjitsu::RemoteDriver>(sv[0]);
   int backing = static_cast<int>(::syscall(SYS_memfd_create, "allocation_slice", MFD_CLOEXEC));
   ASSERT_GE(backing, 0);
   const CloseOnScopeExit backing_closer{backing};
@@ -3554,11 +3556,11 @@ void check_allocation_slice(bool userptr) {
             static_cast<ssize_t>(response.size()));
   if (userptr)
     allocation.mmap_offset = reinterpret_cast<uint64_t>(original);
-  ASSERT_EQ(rd.ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
+  ASSERT_EQ(rd->ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
   int lookup_fd = -1;
   off_t lookup_offset = 0;
   ASSERT_EQ(
-      rd.find_memfd_for_addr(static_cast<char *>(original) + 128, 256, &lookup_fd, &lookup_offset),
+      rd->find_memfd_for_addr(static_cast<char *>(original) + 128, 256, &lookup_fd, &lookup_offset),
       rocjitsu::RemoteDriver::MemfdLookup::kFound);
   const CloseOnScopeExit lookup_closer{lookup_fd};
   EXPECT_EQ(lookup_offset, 8192 + 128);
@@ -3569,7 +3571,8 @@ void check_allocation_slice(bool userptr) {
   const rocjitsu::RpcMmapResponse map_reply{};
   ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
   ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &map_reply, sizeof(map_reply)));
-  auto *mapped = rd.mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, allocation.mmap_offset);
+  auto *mapped =
+      rd->mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, allocation.mmap_offset);
   ASSERT_NE(mapped, MAP_FAILED);
   EXPECT_EQ(*static_cast<uint64_t *>(mapped), marker + (userptr ? 1 : 0));
   if (userptr) {
@@ -3578,24 +3581,31 @@ void check_allocation_slice(bool userptr) {
   }
   EXPECT_GE(::fcntl(lookup_fd, F_GETFD), 0);
   ASSERT_EQ(::munmap(mapped, 4096), 0);
-  kfd_ioctl_free_memory_of_gpu_args free_args{};
-  free_args.handle = allocation.handle;
-  header.opcode = rocjitsu::RPC_IOCTL;
-  header.payload_bytes = sizeof(free_args);
-  if (userptr) {
-    header.result = -EBUSY;
+  if (release == AllocationRelease::Close) {
+    ASSERT_EQ(rd->close(), 0);
+    ASSERT_EQ(rd->close(), 0);
+  } else if (release == AllocationRelease::Destroy) {
+    rd.reset();
+  } else {
+    kfd_ioctl_free_memory_of_gpu_args free_args{};
+    free_args.handle = allocation.handle;
+    header.opcode = rocjitsu::RPC_IOCTL;
+    header.payload_bytes = sizeof(free_args);
+    if (userptr) {
+      header.result = -EBUSY;
+      ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
+      ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
+      ASSERT_EQ(rd->ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), -EBUSY);
+      const uint64_t still_shared = marker + 3;
+      ASSERT_EQ(::pwrite(backing, &still_shared, sizeof(still_shared), 8192), sizeof(still_shared));
+      EXPECT_EQ(*static_cast<uint64_t *>(original), still_shared);
+      *static_cast<uint64_t *>(original) = marker + 2;
+      header.result = 0;
+    }
     ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
     ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
-    ASSERT_EQ(rd.ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), -EBUSY);
-    const uint64_t still_shared = marker + 3;
-    ASSERT_EQ(::pwrite(backing, &still_shared, sizeof(still_shared), 8192), sizeof(still_shared));
-    EXPECT_EQ(*static_cast<uint64_t *>(original), still_shared);
-    *static_cast<uint64_t *>(original) = marker + 2;
-    header.result = 0;
+    ASSERT_EQ(rd->ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), 0);
   }
-  ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
-  ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
-  ASSERT_EQ(rd.ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), 0);
   if (userptr) {
     const uint64_t reused = 0xdeadbeef;
     ASSERT_EQ(::pwrite(backing, &reused, sizeof(reused), 8192), sizeof(reused));
@@ -3617,6 +3627,14 @@ TEST(RemoteDriverBackingTest, AllocationLookupAndCachedMmapPreserveSliceOffset) 
 
 TEST(RemoteDriverBackingTest, UserptrPromotionWritesOnlyItsBackingSlice) {
   check_allocation_slice(true);
+}
+
+TEST(RemoteDriverBackingTest, ClosePreservesLiveUserptrMemory) {
+  check_allocation_slice(true, AllocationRelease::Close);
+}
+
+TEST(RemoteDriverBackingTest, DestructionPreservesLiveUserptrMemory) {
+  check_allocation_slice(true, AllocationRelease::Destroy);
 }
 
 // --- RemoteDriver RPC stream poisoning ---
