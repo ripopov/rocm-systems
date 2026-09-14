@@ -146,6 +146,16 @@ typedef struct rj_kmd_free_request {
   uint64_t allocation_id;
 } rj_kmd_free_request_t;
 
+/// Semantic policies, not hardware PTE encodings. Backends must translate
+/// these values to their device format or reject an unsupported policy.
+typedef enum rj_kmd_memory_type {
+  RJ_KMD_MEMORY_UC = 0,
+  RJ_KMD_MEMORY_CC = 1,
+  RJ_KMD_MEMORY_RW = 2,
+  RJ_KMD_MEMORY_WB = 3,
+  RJ_KMD_MEMORY_NT = 4
+} rj_kmd_memory_type_t;
+
 typedef struct rj_kmd_mapping {
   uint32_t abi_version;
   uint32_t struct_size;
