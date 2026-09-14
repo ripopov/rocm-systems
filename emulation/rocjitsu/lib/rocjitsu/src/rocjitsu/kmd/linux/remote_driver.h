@@ -193,6 +193,7 @@ public:
 
 private:
   int send_ioctl(unsigned long request, void *arg);
+  int send_ioctl_locked(unsigned long request, void *arg);
   int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset, int *memfd_out,
                 RpcSharedBacking *backing_out);
 
@@ -239,6 +240,8 @@ private:
     int fd;
     uint64_t offset;
     uint64_t size;
+    uint64_t userptr_address = 0;
+    uint64_t userptr_size = 0;
   };
   std::unordered_map<uint64_t, AllocationBacking> handle_memfds_;
 
