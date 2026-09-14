@@ -224,6 +224,24 @@ void *safe_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t of
   return reinterpret_cast<void *>(static_cast<uintptr_t>(rc));
 }
 
+// Restore caller-owned storage before its device-backed registration is
+// released. Keep the original mapping intact if preparing the copy fails.
+int detach_userptr(uint64_t address, uint64_t size) {
+  if (!address)
+    return 0;
+  auto *original = reinterpret_cast<void *>(address);
+  auto *copy = safe_mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (copy == MAP_FAILED)
+    return -errno;
+  std::memcpy(copy, original, size);
+  if (syscall(SYS_mremap, copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, original) == -1) {
+    const int error = errno;
+    syscall(SYS_munmap, copy, size);
+    return -error;
+  }
+  return 0;
+}
+
 Sysfs::GpuInfo gpu_info_from_rpc(const RpcGpuInfo &src) {
   Sysfs::GpuInfo gpu{};
   gpu.gpu_id = src.gpu_id;
@@ -466,10 +484,11 @@ RemoteDriver::RemoteDriver(int sock_fd) : sock_(sock_fd) {
 }
 
 RemoteDriver::~RemoteDriver() {
-  for (auto &[handle, backing] : handle_memfds_) {
-    if (backing.fd >= 0)
-      syscall(SYS_close, backing.fd);
-  }
+  // Destruction must honor the same caller-memory lifetime as explicit close.
+  // Releasing the connection after a failed detach could expose reused device
+  // storage through an application pointer; a destructor cannot report that.
+  if (close() != 0)
+    std::terminate();
   if (kfd_marker_ != nullptr)
     syscall(SYS_munmap, kfd_marker_, kfd_marker_size_);
   if (sock_ >= 0)
@@ -626,6 +645,15 @@ int RemoteDriver::close() {
 
   {
     std::lock_guard<std::mutex> lock(rpc_mutex_);
+    for (auto &[handle, backing] : handle_memfds_) {
+      const int result = detach_userptr(backing.userptr_address, backing.userptr_size);
+      if (result != 0) {
+        protocol_failed_.store(true);
+        return result;
+      }
+      backing.userptr_address = 0;
+      backing.userptr_size = 0;
+    }
     if (sock_ >= 0) {
       RpcHeader hdr{};
       hdr.opcode = RPC_CLOSE;
@@ -744,21 +772,14 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
     return send_ioctl_locked(request, arg);
 
   // The caller owns USERPTR memory beyond deregistration. Detach it before
-  // FREE allows a device allocator to reuse the shared backing. A temporary
-  // anonymous mapping keeps the original intact if allocation/remapping fails.
+  // FREE allows a device allocator to reuse the shared backing.
   const auto backing = allocation->second;
   auto *address = reinterpret_cast<void *>(backing.userptr_address);
-  auto *copy = safe_mmap(nullptr, backing.userptr_size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (copy == MAP_FAILED)
-    return -errno;
-  std::memcpy(copy, address, backing.userptr_size);
-  if (syscall(SYS_mremap, copy, backing.userptr_size, backing.userptr_size,
-              MREMAP_MAYMOVE | MREMAP_FIXED, address) == -1) {
-    const int error = errno;
-    syscall(SYS_munmap, copy, backing.userptr_size);
-    return -error;
-  }
+  const int detached = detach_userptr(backing.userptr_address, backing.userptr_size);
+  if (detached != 0)
+    return detached;
+  allocation->second.userptr_address = 0;
+  allocation->second.userptr_size = 0;
 
   const int result = send_ioctl_locked(request, arg);
   // A rejected FREE still owns device storage and must remain shared for a
@@ -770,6 +791,8 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
       protocol_failed_.store(true);
       return -EPROTO;
     }
+    allocation->second.userptr_address = backing.userptr_address;
+    allocation->second.userptr_size = backing.userptr_size;
   }
   return result;
 }
