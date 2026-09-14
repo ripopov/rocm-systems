@@ -285,6 +285,7 @@ typedef struct rj_kmd_server_stats {
   uint64_t active_clients;
   uint64_t active_processes;
   uint64_t active_queues;
+  /// In-flight RPC requests, including device waits and response transmission.
   uint64_t pending_responses;
   uint64_t pending_doorbells;
 } rj_kmd_server_stats_t;
@@ -293,6 +294,8 @@ RJ_KMD_API int32_t rj_kmd_server_create(const rj_kmd_device_info_t *device,
                                         const rj_kmd_server_config_t *config,
                                         const rj_kmd_backend_ops_t *backend,
                                         rj_kmd_server_t **server, char *error, size_t error_size);
+/// Stops clients and pumps their cleanup callbacks before releasing storage.
+/// A wrong-thread call is rejected without destroying the server.
 RJ_KMD_API void rj_kmd_server_destroy(rj_kmd_server_t *server);
 RJ_KMD_API int32_t rj_kmd_server_listen(rj_kmd_server_t *server, char *error, size_t error_size);
 RJ_KMD_API int32_t rj_kmd_server_stop_accepting(rj_kmd_server_t *server);

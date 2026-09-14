@@ -1,0 +1,6 @@
+ROCJITSU_KMD_2 {
+  global:
+    rj_kmd_server_*;
+  local:
+    *;
+};
