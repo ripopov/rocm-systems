@@ -3256,7 +3256,7 @@ void VCvtScalef32F32Fp8Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t narrow_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f = static_cast<float>(static_cast<double>(util::fp8_e4m3_to_f32(narrow_val)) * scale);
     amdgpu::sdwa::write_lane<false>(*this, wf, vdst, lane, std::bit_cast<uint32_t>(f));
@@ -3276,7 +3276,7 @@ void VCvtScalef32F32Bf8Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t narrow_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f = static_cast<float>(static_cast<double>(util::bf8_e5m2_to_f32(narrow_val)) * scale);
     amdgpu::sdwa::write_lane<false>(*this, wf, vdst, lane, std::bit_cast<uint32_t>(f));
@@ -3364,7 +3364,7 @@ void VCvtScalef32PkF32Fp4Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t byte_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f0 = static_cast<float>(
         static_cast<double>(util::fp4_e2m1_to_f32(static_cast<uint8_t>(byte_val & 0xF))) * scale);
@@ -3682,7 +3682,7 @@ void VCvtScalef32F16Fp8Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t narrow_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f = static_cast<float>(static_cast<double>(util::fp8_e4m3_to_f32(narrow_val)) * scale);
     uint32_t bits = static_cast<uint32_t>(util::f32_to_f16_mode(f, wf.fp16_ovfl()));
@@ -3709,7 +3709,7 @@ void VCvtScalef32F16Bf8Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t narrow_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f = static_cast<float>(static_cast<double>(util::bf8_e5m2_to_f32(narrow_val)) * scale);
     uint32_t bits = static_cast<uint32_t>(util::f32_to_f16_mode(f, wf.fp16_ovfl()));
@@ -3858,7 +3858,7 @@ void VCvtScalef32PkF16Fp4Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t byte_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f0 = static_cast<float>(
         static_cast<double>(util::fp4_e2m1_to_f32(static_cast<uint8_t>(byte_val & 0xF))) * scale);
@@ -3886,7 +3886,7 @@ void VCvtScalef32PkBf16Fp4Vop3::execute_impl(amdgpu::Wavefront &wf) {
     }
     double scale = std::ldexp(1.0, static_cast<int>(biased_exp) - 127);
     uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane(src0, lane);
-    uint32_t src_byte = inst_.op_sel & 0x3;
+    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);
     uint8_t byte_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);
     float f0 = static_cast<float>(
         static_cast<double>(util::fp4_e2m1_to_f32(static_cast<uint8_t>(byte_val & 0xF))) * scale);
