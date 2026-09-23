@@ -1126,6 +1126,7 @@ TEST_F(KfdIoctlTest, GetTileConfigRejectsUnknownGpuId) {
 
 TEST_F(KfdIoctlTest, GetTileConfigReturnsUnsupportedInDaemonMode) {
   ASSERT_NE(soc_, nullptr);
+  ASSERT_EQ(driver_->close(), 0);
   rocjitsu::SimulatedKfd daemon_driver(*soc_, true);
   uint32_t process_id = daemon_driver.open_process();
   ASSERT_NE(process_id, 0u);
@@ -5854,12 +5855,10 @@ TEST_F(KfdIoctlTest, DbgTrapMemoryViolationStopsTheWaveAndPublishesItsRecord) {
   EXPECT_EQ(notifications, 1u);
 }
 
-// The arch gate cannot be the only check: on a modelled part serialization can
-// still fail, and the wave is already stopped by then because the serializer
-// selects waves by debug_stopped(). An area too small for the queue's waves is
-// the reachable case -- ROCr sizes it from the largest dispatch it expects, and
-// nothing validates it at CREATE_QUEUE. The stop has to come back off the wave.
-TEST_F(KfdIoctlTest, DbgTrapUnpublishableStopRollsBackInsteadOfStrandingTheWave) {
+// Serialization can fail on a modelled part when the context area is too small.
+// The debugger must roll back its stop; the original invalid access then takes
+// the simulator's ordinary terminal VM-fault path.
+TEST_F(KfdIoctlTest, DbgTrapUnpublishableStopFallsBackToMemoryFault) {
   constexpr uint64_t kKernelAddress = 0x600000000ULL;
   constexpr uint64_t kCwsrAddress = 0x600100000ULL;
   // Enough to map, nowhere near enough for a 16-SGPR, 4-VGPR wave plus header,
@@ -5906,15 +5905,11 @@ TEST_F(KfdIoctlTest, DbgTrapUnpublishableStopRollsBackInsteadOfStrandingTheWave)
   auto *wave = fault_a_wave_on_a_scalar_load(soc_, driver_, kKernelAddress, create.queue_id);
   ASSERT_NE(wave, nullptr);
 
-  // Every field the callback set on the way to the failed publication is back
-  // where it was, so the wave keeps running exactly as it would with nobody
-  // debugging it. Leaving debug_halted set would park it with no record for a
-  // debugger to resume from; leaving TRAPSTS.XNACK_ERROR behind would make the
-  // next stop report a memory violation that never happened.
+  // The debugger leaves no stop state or CWSR record. The real memory fault
+  // still halts the wave, just as it does without a debugger attached.
   EXPECT_FALSE(wave->debug_halted());
-  EXPECT_FALSE(wave->is_halted());
+  EXPECT_TRUE(wave->is_halted());
   EXPECT_EQ(wave->trapsts() & kTrapstsXnackError, 0u);
-  EXPECT_EQ(wave->pc, kKernelAddress + 8);
 
   uint64_t notifications = 0;
   EXPECT_EQ(::read(notifier, &notifications, sizeof(notifications)), -1);

@@ -6524,7 +6524,7 @@ TEST(Cdna4CvtScaleTest, WideningSelectsEverySourceByte) {
         std::unique_ptr<Instruction> inst(decode_valid(*decoder, words.data()));
         ASSERT_NE(inst, nullptr);
         cu->write_vgpr(vb + 2, 0, 0xA5A5BEEFu);
-        cu->execute_instruction(inst.get(), *wf);
+        ASSERT_TRUE(cu->execute_instruction(inst.get(), *wf).succeeded());
         const uint32_t half_values[] = {0x3C00u, 0x4000u, 0x4200u, 0x4400u};
         const uint32_t expected =
             half ? (0xA5A50000u | half_values[byte]) : std::bit_cast<uint32_t>(float(byte + 1));

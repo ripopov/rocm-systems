@@ -8,6 +8,7 @@
 #include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/guest_kfd.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
+#include "rocjitsu/vm/amdgpu/gpu_vm.h"
 #include "rocjitsu/vm/rj_vm.h"
 #include "rocjitsu/vm/rj_vm_impl.h"
 #include "rocjitsu/vm/virtual_machine.h"
@@ -121,9 +122,15 @@ TEST_F(SimulatedKfdTest, UserptrUsesCpuAddressRatherThanGpuAddress) {
   alloc.gpu_id = driver->gpu_id();
   alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
   ASSERT_EQ(driver->ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &alloc), 0);
-  ASSERT_NE(t.memory(), nullptr);
-  EXPECT_EQ(t.memory()->read32(alloc.va_addr, driver->local_process_id()), 17);
-  t.memory()->write32(alloc.va_addr, 29, driver->local_process_id());
+  const auto access = t.soc()->gpu_vm().snapshot_vmid(driver->local_process_id());
+  ASSERT_TRUE(access);
+  uint32_t value = 0;
+  EXPECT_EQ(access->read(alloc.va_addr, std::as_writable_bytes(std::span(&value, 1))),
+            rocjitsu::amdgpu::VmAccessOutcome::Complete);
+  EXPECT_EQ(value, 17);
+  const uint32_t replacement = 29;
+  EXPECT_EQ(access->write(alloc.va_addr, std::as_bytes(std::span(&replacement, 1))),
+            rocjitsu::amdgpu::VmAccessOutcome::Complete);
   EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
   EXPECT_EQ(driver->close(), 0);
   // Registration does not transfer ownership of the application's storage.
@@ -151,7 +158,7 @@ TEST_F(SimulatedKfdTest, DeviceProcessMappingIsolationRemapAndTeardown) {
   auto t = create_test_vm();
   auto *vm = dynamic_cast<rocjitsu::VirtualMachine *>(t.engine->topology().root());
   ASSERT_NE(vm, nullptr);
-  rocjitsu::kmd::SimdojoDeviceBackend backend(*vm->soc(0));
+  rocjitsu::kmd::SimdojoDeviceBackend backend(*vm->soc(0), 0);
   rocjitsu::KfdProcess first(101, 1);
   rocjitsu::KfdProcess second(102, 1);
   alignas(4096) std::array<uint64_t, 512> first_page{};

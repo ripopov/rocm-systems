@@ -8,10 +8,12 @@
 #include "rocjitsu/kmd/device/device_memory.h"
 #include "rocjitsu/kmd/device/memory_fault.h"
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 
 namespace rocjitsu {
 class KfdProcess;
@@ -91,10 +93,18 @@ struct QueueDescriptor {
   void *doorbell_base = nullptr;
   bool host_accessible = false;
   bool is_sdma = false;
+  uint32_t sdma_engine_id = 0;
   bool xcd_fanout = false;
   uint64_t queue_desc_va = 0;
   uint64_t exception_status_va = 0;
   uint32_t exception_event_id = 0;
+};
+
+struct CuMaskGeometry {
+  uint32_t shader_engines = 0;
+  uint32_t arrays_per_engine = 0;
+  uint32_t cu_per_array = 0;
+  uint32_t active_cus = 0;
 };
 
 /// @brief Device operations used by the common KFD policy implementation.
@@ -131,9 +141,18 @@ public:
   virtual int update_queue(uint32_t process, uint32_t queue, uint64_t ring, uint32_t size,
                             uint32_t percentage) = 0;
   virtual void destroy_queue(uint32_t process, uint32_t queue) = 0;
+  virtual int set_cu_mask(uint32_t process, uint32_t queue, std::span<const uint32_t> mask,
+                          CuMaskGeometry geometry, bool is_sdma) {
+    (void)process;
+    (void)queue;
+    (void)mask;
+    (void)geometry;
+    (void)is_sdma;
+    return -ENOTSUP;
+  }
   virtual void set_doorbell_base(uint32_t process, void *base) = 0;
   virtual uint64_t read64(uint32_t process, uint64_t address) = 0;
-  virtual void write64(uint32_t process, uint64_t address, uint64_t value) = 0;
+  virtual bool write64(uint32_t process, uint64_t address, uint64_t value) = 0;
 };
 
 } // namespace kmd

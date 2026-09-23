@@ -208,14 +208,15 @@ uint64_t CallbackDeviceBackend::read64(uint32_t process, uint64_t address) {
   });
 }
 
-void CallbackDeviceBackend::write64(uint32_t process, uint64_t address, uint64_t value) {
-  dispatcher_.invoke([&] {
+bool CallbackDeviceBackend::write64(uint32_t process, uint64_t address, uint64_t value) {
+  return dispatcher_.invoke([&] {
     require_success(failure());
     auto request = record<rj_kmd_write64_t>();
     request.process_id = process;
     request.gpu_va = address;
     request.value = value;
     require_success(status(operations_.write64(operations_.context, &request)));
+    return true;
   });
 }
 

@@ -43,9 +43,6 @@ rj_add_object_library(rocjitsu_kmd
     ../device/simdojo_kfd.cpp
     guest_kfd.cpp
     legacy_gpu_vm.cpp
-    libc_passthrough.cpp
-    linux_kfd.cpp
-    kmd_rpc_server.cpp
     remote_driver.cpp
     rj_daemon.cpp
 )

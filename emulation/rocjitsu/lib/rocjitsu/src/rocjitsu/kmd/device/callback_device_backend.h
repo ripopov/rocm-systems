@@ -34,7 +34,7 @@ public:
   void destroy_queue(uint32_t process, uint32_t queue) override;
   void set_doorbell_base(uint32_t process, void *base) override;
   uint64_t read64(uint32_t process, uint64_t address) override;
-  void write64(uint32_t process, uint64_t address, uint64_t value) override;
+  bool write64(uint32_t process, uint64_t address, uint64_t value) override;
 
   int failure() const { return memory_.failure(); }
   uint64_t active_processes() const { return active_processes_.load(); }

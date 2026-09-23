@@ -5,7 +5,7 @@
 #include "rocjitsu/kmd/linux/cwsr.h"
 #include "rocjitsu/vm/amdgpu/command_processor.h"
 #include "rocjitsu/vm/amdgpu/compute_unit.h"
-#include "rocjitsu/vm/amdgpu/gpu_memory.h"
+#include "rocjitsu/vm/amdgpu/gpu_vm.h"
 #include "rocjitsu/vm/amdgpu/hwreg.h"
 #include "rocjitsu/vm/amdgpu/wavefront.h"
 #include "rocjitsu/vm/amdgpu/xcd.h"
@@ -278,7 +278,7 @@ std::optional<uint64_t> kmd::SimdojoDeviceBackend::save_queue(const DebugQueueCo
       cu->with_wave_state_locked([&] {
         for (uint32_t i = 0; i < cu->num_wf_slots(); ++i) {
           auto *wave = cu->wf(i);
-          if (wave->debug_stopped() && wave->process_id() == process_id &&
+          if (wave && wave->debug_stopped() && wave->process_id() == process_id &&
               wave->queue_id() == queue_id)
             waves_by_area[area].push_back(build_cwsr_wave_state(*wave, soc_.arch()));
         }
@@ -297,7 +297,7 @@ std::optional<uint64_t> kmd::SimdojoDeviceBackend::save_queue(const DebugQueueCo
   if (wave_count == 0)
     return std::nullopt;
 
-  auto *memory = soc_.memory();
+  const auto access = soc_.gpu_vm().snapshot_vmid(process_id);
   bool publish_ok = true;
   auto write_block = [&](uint64_t address, std::span<const uint8_t> bytes) {
     if (context.target_mem_fd < 0) {
@@ -305,7 +305,8 @@ std::optional<uint64_t> kmd::SimdojoDeviceBackend::save_queue(const DebugQueueCo
       // debugger a context is available at an address that holds none of it.
       // The pwrite path below fails publication on a short write for the same
       // reason; this is that failure arriving through the memory model.
-      if (memory->write_block(address, bytes, process_id) == amdgpu::AccessOutcome::Faulted) {
+      if (!access ||
+          access->write(address, std::as_bytes(bytes)) != amdgpu::VmAccessOutcome::Complete) {
         publish_ok = false;
         util::Logger::warn("CWSR target write faulted: addr=0x", std::hex, address, std::dec,
                            " pid=", context.client_pid);
@@ -356,7 +357,7 @@ bool kmd::SimdojoDeviceBackend::restore_queue(const DebugQueueContext &context) 
       cu->with_wave_state_locked([&] {
         for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
           auto *wave = cu->wf(slot);
-          if (wave->debug_stopped() && wave->process_id() == context.process_id &&
+          if (wave && wave->debug_stopped() && wave->process_id() == context.process_id &&
               wave->queue_id() == context.queue_id) {
             stopped.push_back(wave);
             states_by_area[area].push_back(build_cwsr_wave_state(*wave, soc_.arch()));
@@ -374,7 +375,7 @@ bool kmd::SimdojoDeviceBackend::restore_queue(const DebugQueueContext &context) 
   }
   bool restored = stopped.empty();
   if (!stopped.empty() && context.base != 0) {
-    auto *memory = soc_.memory();
+    const auto access = soc_.gpu_vm().snapshot_vmid(context.process_id);
     bool read_ok = true;
     auto read_block = [&](uint64_t address, std::span<uint8_t> bytes) {
       if (context.target_mem_fd < 0) {
@@ -383,8 +384,8 @@ bool kmd::SimdojoDeviceBackend::restore_queue(const DebugQueueContext &context) 
         // a zero program counter rather than staying stopped. The pread path
         // below already treats a short read that way, and this is the same
         // failure arriving through the memory model instead of the kernel.
-        if (memory->read_block(address, bytes, context.process_id) ==
-            amdgpu::AccessOutcome::Faulted) {
+        if (!access || access->read(address, std::as_writable_bytes(bytes)) !=
+                           amdgpu::VmAccessOutcome::Complete) {
           read_ok = false;
           util::Logger::warn("CWSR target read faulted: addr=0x", std::hex, address, std::dec,
                              " pid=", context.client_pid);
@@ -503,8 +504,8 @@ bool kmd::SimdojoDeviceBackend::suspend_queue(uint32_t process_id, uint32_t queu
       cu->with_wave_state_locked([&] {
         for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
           auto *wave = cu->wf(slot);
-          if (!wave->is_halted() && !wave->debug_suspended() && wave->process_id() == process_id &&
-              wave->queue_id() == queue_id) {
+          if (wave && !wave->is_halted() && !wave->debug_suspended() &&
+              wave->process_id() == process_id && wave->queue_id() == queue_id) {
             wave->set_debug_suspended(true);
             newly_suspended.emplace_back(cu, wave);
           }
@@ -542,7 +543,7 @@ void kmd::SimdojoDeviceBackend::clear_completed_queue(const DebugQueueContext &c
       cu->with_wave_state_locked([&] {
         for (uint32_t slot = 0; slot < cu->num_wf_slots(); ++slot) {
           const auto *wave = cu->wf(slot);
-          if (wave->debug_stopped() && wave->process_id() == process_id &&
+          if (wave && wave->debug_stopped() && wave->process_id() == process_id &&
               wave->queue_id() == queue_id)
             has_stopped_wave = true;
         }
@@ -550,13 +551,16 @@ void kmd::SimdojoDeviceBackend::clear_completed_queue(const DebugQueueContext &c
     }
   });
   if (!has_stopped_wave) {
-    auto *memory = soc_.memory();
+    const auto access = soc_.gpu_vm().snapshot_vmid(process_id);
     const uint32_t area_count =
         soc_.arch() == ROCJITSU_CODE_ARCH_CDNA5 ? std::max(1u, soc_.num_xcds()) : 1u;
     for (uint32_t area = 0; area < area_count; ++area) {
       const uint64_t area_base = context.base + static_cast<uint64_t>(area) * context.size;
       for (uint64_t offset = 0; offset < 40; offset += sizeof(uint32_t))
-        memory->write32(area_base + offset, 0, process_id);
+        if (access) {
+          const uint32_t zero = 0;
+          (void)access->write(area_base + offset, std::as_bytes(std::span(&zero, 1)));
+        }
     }
   }
 }

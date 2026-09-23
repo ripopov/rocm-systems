@@ -64,7 +64,7 @@ public:
   }
   void set_doorbell_base(uint32_t, void *) override {}
   uint64_t read64(uint32_t, uint64_t) override { return 0; }
-  void write64(uint32_t, uint64_t, uint64_t) override {}
+  bool write64(uint32_t, uint64_t, uint64_t) override { return true; }
 };
 
 class TestDeviceMemory : public rocjitsu::kmd::DeviceMemory {
@@ -590,7 +590,7 @@ TEST(KmdCoreTest, QueueUpdateTargetsOwnerAndPreservesSnapshotOnFailure) {
   EXPECT_EQ(process->queue_snapshot_map_.at(create.queue_id).ring_base_address, 0x20000u);
   EXPECT_EQ(process->queue_snapshot_map_.at(create.queue_id).ring_size, 8192u);
   update.queue_id = 0xFFFFFFFF;
-  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UPDATE_QUEUE, &update), -EINVAL);
+  EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_UPDATE_QUEUE, &update), -EFAULT);
   EXPECT_EQ(owner->update_calls, 2u);
   EXPECT_EQ(other->update_calls, 0u);
   EXPECT_EQ(driver.close(pid), 0);
