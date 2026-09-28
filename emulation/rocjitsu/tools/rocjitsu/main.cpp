@@ -374,18 +374,18 @@ dbt_execution_gpu_ordinals(const std::string &dbt_config_path,
 
 void print_usage() {
   std::cerr
-      << "Usage: rocjitsu --config <config.json> [--daemon|--attach] -- <app> [args...]\n"
+      << "Usage: rocjitsu [--config <config.json>] [--daemon|--attach] -- <app> [args...]\n"
          "\n"
          "Modes:\n"
          "  rocjitsu --config foo.json -- ./app          Local mode (in-process simulation)\n"
          "  rocjitsu --daemon --config foo.json -- ./app Daemon mode (fork daemon + launch app)\n"
          "  rocjitsu --daemon --config foo.json          Daemon-only (run server)\n"
-         "  rocjitsu --attach --config foo.json -- ./app Attach to running daemon\n"
+         "  rocjitsu --attach -- ./app                  Attach to running daemon\n"
          "  rocjitsu --config foo.json --vfio-socket <path>\n"
          "                                               Serve a PCI device to a VMM\n"
          "\n"
          "Options:\n"
-         "  --config <path>   Simulation config JSON (required)\n"
+         "  --config <path>   Simulation config JSON (optional for --attach)\n"
          "  --cpu-thread-budget <n>, --cpu-thread-budget=<n>\n"
          "                    Replace cpu_thread_budget for this launch only; the\n"
          "                    config file is left unchanged. Zero selects automatic\n"
@@ -484,14 +484,19 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (!config_path) {
+  if (daemon_mode && attach_mode) {
+    std::cerr << "rocjitsu: --daemon and --attach are mutually exclusive\n";
+    return 1;
+  }
+
+  if (!config_path && (!attach_mode || vfio_socket)) {
     std::cerr << "rocjitsu: --config is required\n";
     print_usage();
     return 1;
   }
 
-  auto abs_config = std::filesystem::absolute(config_path).string();
-  if (!std::filesystem::exists(abs_config)) {
+  auto abs_config = config_path ? std::filesystem::absolute(config_path).string() : std::string{};
+  if (config_path && !std::filesystem::exists(abs_config)) {
     std::cerr << std::format("rocjitsu: config file not found: {}\n", abs_config);
     return 1;
   }
@@ -598,9 +603,13 @@ int main(int argc, char *argv[]) {
 
   rocjitsu::config::DbtGuestConfig dbt_guest_config;
   try {
-    dbt_guest_config = rocjitsu::config::load_dbt_guest_config_from_file(abs_config);
-    if (!dbt_guest_config.enabled)
-      (void)rocjitsu::config::load_config(abs_config, rocjitsu::kEmbeddedSchema);
+    // An attached client gets device identity and topology from the server.
+    // Preserve validation for callers that explicitly supply a config.
+    if (config_path) {
+      dbt_guest_config = rocjitsu::config::load_dbt_guest_config_from_file(abs_config);
+      if (!dbt_guest_config.enabled)
+        (void)rocjitsu::config::load_config(abs_config, rocjitsu::kEmbeddedSchema);
+    }
   } catch (const std::exception &e) {
     std::cerr << std::format("rocjitsu: failed to parse config: {}\n", e.what());
     return 1;

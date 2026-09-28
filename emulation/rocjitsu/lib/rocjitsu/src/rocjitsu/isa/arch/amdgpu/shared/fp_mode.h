@@ -737,7 +737,16 @@ inline uint16_t fma_f16(uint16_t src0, uint16_t src1, uint16_t src2, bool abs0, 
   const double multiplicand = static_cast<double>(util::f16_to_f32(src0));
   const double multiplier = static_cast<double>(util::f16_to_f32(src1));
   const double addend = static_cast<double>(util::f16_to_f32(src2));
-  double value = std::fma(multiplicand, multiplier, addend);
+  // Host FMA instruction forms may choose different NaN payloads when more than
+  // one operand is NaN. Select the first source explicitly so scalar and SIMD
+  // execution produce the same guest result on every host compiler.
+  const auto is_nan = [](uint16_t bits) {
+    return (bits & 0x7c00u) == 0x7c00u && (bits & 0x03ffu) != 0;
+  };
+  const double value_from_nan = is_nan(src0) ? multiplicand : is_nan(src1) ? multiplier : addend;
+  double value = (is_nan(src0) || is_nan(src1) || is_nan(src2))
+                     ? value_from_nan
+                     : std::fma(multiplicand, multiplier, addend);
   if (value == 0.0) {
     // F16 products cannot underflow in double: zero here is exact. Cancellation
     // uses the guest rounding mode; matching zero signs retain their sign.

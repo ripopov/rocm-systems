@@ -200,6 +200,7 @@ struct HostImageLoader {
 bool map_userptr(SimulatedKfd *driver, uint32_t pid, void *host, size_t size) {
   kfd_ioctl_alloc_memory_of_gpu_args alloc{};
   alloc.va_addr = reinterpret_cast<uint64_t>(host);
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(host);
   alloc.size = size;
   alloc.gpu_id = kGpuId;
   alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;

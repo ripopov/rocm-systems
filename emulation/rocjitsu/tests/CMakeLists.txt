@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 include(rj_configure_target)
+include(rj_test_registration)
+include(rj_kmd_tests)
+if(RJ_KMD_SERVER_ONLY)
+    return()
+endif()
+
 include(rj_find_amdcxx)
 
 # Device kernels (compiled from HIP sources for simulator testing).
@@ -420,6 +426,13 @@ add_dependencies(rj_decode_fuzz_test rj_decode_fuzz)
 rj_add_gtest_tests(rj_decode_fuzz_test)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME RocjitsuAttachCliTest
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_attach_cli.py
+        $<TARGET_FILE:rocjitsu_bin>
+)
 add_test(
     NAME DecodeDifferentialUnitTest
     COMMAND
