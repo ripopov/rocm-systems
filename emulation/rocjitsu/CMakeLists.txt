@@ -96,6 +96,10 @@ option(
     OFF
 )
 option(RJ_INSTALL_TESTS "Install rocjitsu test binaries" OFF)
+option(RJ_KMD_SERVER_ONLY "Build only the reusable Linux KMD server components" OFF)
+if(RJ_KMD_SERVER_ONLY AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "RJ_KMD_SERVER_ONLY requires Linux")
+endif()
 option(
     ROCJITSU_ENABLE_PERFSIM_PLUGIN
     "Build the optional RocJITsu adapter for an external Perfsim observer plugin"
@@ -345,15 +349,22 @@ set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FLATBUFFERS_INSTALL OFF CACHE BOOL "" FORCE)
 set(FLATBUFFERS_BUILD_FLATLIB ON CACHE BOOL "" FORCE)
 
-FetchContent_MakeAvailable(googletest flatbuffers)
-
-include(rj_flatbuffers)
+if(NOT RJ_KMD_SERVER_ONLY OR BUILD_TESTING)
+    FetchContent_MakeAvailable(googletest)
+endif()
+if(NOT RJ_KMD_SERVER_ONLY)
+    FetchContent_MakeAvailable(flatbuffers)
+    include(rj_flatbuffers)
+endif()
 
 # Set include paths before adding subdirectories so all targets can find them.
 set(ROCJITSU_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/lib/rocjitsu/include)
 set(ROCJITSU_SRC_DIR ${PROJECT_SOURCE_DIR}/lib/rocjitsu/src)
 
 if(ROCJITSU_ENABLE_VFIO)
+    if(RJ_KMD_SERVER_ONLY)
+        message(FATAL_ERROR "RJ_KMD_SERVER_ONLY cannot build the VFIO simulator frontend")
+    endif()
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(
             FATAL_ERROR
@@ -369,15 +380,25 @@ if(BUILD_TESTING)
 endif()
 
 # Keep library and tests ahead of rj_host_cpu to avoid inheriting its -march policy.
-add_subdirectory(lib/arith)
+if(NOT RJ_KMD_SERVER_ONLY)
+    add_subdirectory(lib/arith)
+endif()
 
 # Apply the host CPU policy to rocjitsu targets, after configuring dependencies.
 include(rj_host_cpu)
 
 # Libraries
 add_subdirectory(lib/util)
-add_subdirectory(lib/simdojo)
+if(NOT RJ_KMD_SERVER_ONLY)
+    add_subdirectory(lib/simdojo)
+endif()
 add_subdirectory(lib/rocjitsu)
+if(RJ_KMD_SERVER_ONLY)
+    if(BUILD_TESTING)
+        add_subdirectory(tests)
+    endif()
+    return()
+endif()
 add_subdirectory(lib/rocjitsu/src/rocjitsu/vm/plugins)
 
 # Main shared library - assembles all object libraries.

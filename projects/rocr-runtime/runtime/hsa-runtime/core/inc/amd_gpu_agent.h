@@ -491,7 +491,8 @@ class GpuAgent : public GpuAgentInt {
   __forceinline void PcieWcFlush(void *ptr, size_t size) const {
     if (!xgmi_cpu_gpu_) {
       store_fence();
-      *((uint8_t*)ptr + size - 1) = *((uint8_t*)ptr + size - 1);
+      volatile uint8_t* last_byte = reinterpret_cast<volatile uint8_t*>(ptr) + size - 1;
+      *last_byte = *last_byte;
       memory_fence();
       auto readback = *(reinterpret_cast<volatile uint8_t*>(ptr) + size - 1);
       UNUSED(readback);

@@ -1702,6 +1702,30 @@ class TestDeriveVectorUnary:
         assert 'util::f32_to_fp8_e4m3_rne_mode(value, wf.fp16_ovfl())' in cpp
 
     @pytest.mark.parametrize(
+        'op',
+        [
+            'f32_fp8',
+            'f32_bf8',
+            'f16_fp8',
+            'f16_bf8',
+            'pk_f32_fp4',
+            'pk_f16_fp4',
+            'pk_bf16_fp4',
+        ],
+    )
+    def test_cvt_scalef32_source_byte_uses_halfword_then_byte_select(self, op):
+        cpp = gen_cvt_scalef32(
+            SimpleNamespace(
+                op=op,
+                dst_ops=['vdst'],
+                src_ops=['src0', 'src1'],
+                arch_name='cdna4',
+            )
+        )
+        assert '((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u)' in cpp
+        assert 'src_byte = inst_.op_sel & 0x3' not in cpp
+
+    @pytest.mark.parametrize(
         ('op', 'helper'),
         [
             ('f16_fp8', 'util::f32_to_f16_mode'),

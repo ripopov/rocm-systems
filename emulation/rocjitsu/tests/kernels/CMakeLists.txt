@@ -65,7 +65,7 @@ if(RJ_AMDCXX_SUPPORTS_GFX1250)
 else()
     message(
         STATUS
-        "gfx1250 device kernel tests disabled (selected amdclang++ does not support gfx1250)"
+        "gfx1250 device kernel tests disabled (selected compiler/device libraries do not support gfx1250)"
     )
 endif()
 

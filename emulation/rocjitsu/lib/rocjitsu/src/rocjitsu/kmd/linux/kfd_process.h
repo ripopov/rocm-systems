@@ -42,6 +42,9 @@ namespace rocjitsu {
 /// @brief DRM BO state (create info, placement, UMD metadata); defined by the interposer.
 /// @details The KFD code only stores and copies pointers to it.
 struct GemObject;
+namespace kmd {
+class DeviceAllocation;
+}
 
 /// @brief Per-process KFD state.
 ///
@@ -110,6 +113,10 @@ public:
     int memfd = -1;
     // Public dma-buf access mode retained across IPC import and re-export.
     int export_access_mode = -1;
+    uint64_t memfd_offset = 0;
+    std::shared_ptr<kmd::DeviceAllocation> device_allocation;
+    std::unordered_set<uint32_t> mapped_gpu_ids;
+    std::optional<amdgpu::Mtype> memory_type_override;
     uint32_t gpu_id = 0;
     bool user_va = false;
     bool imported = false;

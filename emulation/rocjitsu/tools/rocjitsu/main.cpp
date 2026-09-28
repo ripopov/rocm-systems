@@ -381,18 +381,18 @@ dbt_execution_gpu_ordinals(const std::string &dbt_config_path,
 
 void print_usage() {
   std::cerr
-      << "Usage: rocjitsu --config <config.json> [--daemon|--attach] -- <app> [args...]\n"
+      << "Usage: rocjitsu [--config <config.json>] [--daemon|--attach] -- <app> [args...]\n"
          "\n"
          "Modes:\n"
          "  rocjitsu --config foo.json -- ./app          Local mode (in-process simulation)\n"
          "  rocjitsu --daemon --config foo.json -- ./app Daemon mode (fork daemon + launch app)\n"
          "  rocjitsu --daemon --config foo.json          Daemon-only (run server)\n"
-         "  rocjitsu --attach --config foo.json -- ./app Attach to running daemon\n"
+         "  rocjitsu --attach                   -- ./app Attach to running daemon\n"
          "  rocjitsu --config foo.json --vfio-socket <path> [--vfio-socket <path> ...]\n"
          "                                               Serve PCI devices to a VMM\n"
          "\n"
          "Options:\n"
-         "  --config <path>   Simulation config JSON (required)\n"
+         "  --config <path>   Simulation config JSON (optional for --attach)\n"
          "  --node <id>, --node=<id>\n"
          "                    Select one local node from a system manifest. Required\n"
          "                    for multi-node launches. Not available with --attach.\n"
@@ -531,14 +531,19 @@ int main(int argc, char *argv[]) {
 
   overrides.local_node = local_node;
 
-  if (!config_path) {
+  if (daemon_mode && attach_mode) {
+    std::cerr << "rocjitsu: --daemon and --attach are mutually exclusive\n";
+    return 1;
+  }
+
+  if (!config_path && (!attach_mode || !vfio_sockets.empty())) {
     std::cerr << "rocjitsu: --config is required\n";
     print_usage();
     return 1;
   }
 
-  auto abs_config = std::filesystem::absolute(config_path).string();
-  if (!std::filesystem::exists(abs_config)) {
+  auto abs_config = config_path ? std::filesystem::absolute(config_path).string() : std::string{};
+  if (config_path && !std::filesystem::exists(abs_config)) {
     std::cerr << std::format("rocjitsu: config file not found: {}\n", abs_config);
     return 1;
   }
@@ -675,14 +680,17 @@ int main(int argc, char *argv[]) {
 
   rocjitsu::config::DbtGuestConfig dbt_guest_config;
   try {
-    auto maybe_dbt_guest = rocjitsu::config::load_dbt_guest_config_from_file(
-        abs_config, launch_config_diagnostic.emitter());
-    if (maybe_dbt_guest.failed()) {
-      std::cerr << std::format("rocjitsu: failed to parse config: {}\n",
-                               launch_config_diagnostic.message());
-      return 1;
+    // Attach obtains device identity and topology from the server.
+    if (config_path) {
+      auto maybe_dbt_guest = rocjitsu::config::load_dbt_guest_config_from_file(
+          abs_config, launch_config_diagnostic.emitter());
+      if (maybe_dbt_guest.failed()) {
+        std::cerr << std::format("rocjitsu: failed to parse config: {}\n",
+                                 launch_config_diagnostic.message());
+        return 1;
+      }
+      dbt_guest_config = std::move(maybe_dbt_guest.value());
     }
-    dbt_guest_config = std::move(maybe_dbt_guest.value());
   } catch (const std::exception &e) {
     std::cerr << std::format("rocjitsu: failed to parse config: {}\n", e.what());
     return 1;
@@ -717,7 +725,7 @@ int main(int argc, char *argv[]) {
   if (!write_config_for_this_launch())
     return 1;
 
-  if (!dbt_guest_mode) {
+  if (!dbt_guest_mode && config_path) {
     try {
       if (attach_mode) {
         auto graph = rocjitsu::config::load_system_graph(abs_config, rocjitsu::kEmbeddedSchema,

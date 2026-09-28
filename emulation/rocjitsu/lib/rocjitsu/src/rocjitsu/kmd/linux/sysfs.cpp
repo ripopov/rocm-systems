@@ -48,9 +48,8 @@ constexpr uint32_t kFramebufferPrivateHeap = 2;
 /// bounded leak until logout clears the tmpfs), and the mkdtemp XXXXXX suffix keeps
 /// two same-PID generations from colliding. This matches the launcher reaper
 /// (main.cpp reap_stale_runtime_dirs); the tmpfs backstop bounds any leak.
-std::string make_tagged_dir(const char *kind) {
+std::string make_tagged_dir(const char *kind, const std::string &root) {
   std::error_code ec;
-  std::string root = rpc_default_runtime_dir();
   // Fail closed on an empty root: an empty base would make tmpl "/rocjitsu_..._XXXXXX"
   // and try to mkdtemp scratch dirs in the filesystem root. rpc_default_runtime_dir()
   // already treats a set-but-empty $ROCJITSU_RUNTIME_DIR as unset; guard defensively.
@@ -461,8 +460,8 @@ void Sysfs::write_gpu_node(const std::string &nodes_dir, uint32_t node_idx, cons
   }
 }
 
-void Sysfs::write_drm_tree(const std::vector<GpuInfo> &gpus) {
-  drm_dir_ = make_tagged_dir("drm");
+void Sysfs::write_drm_tree(const std::vector<GpuInfo> &gpus, const std::string &runtime_root) {
+  drm_dir_ = make_tagged_dir("drm", runtime_root);
   if (drm_dir_.empty())
     return;
 
@@ -528,15 +527,20 @@ void Sysfs::write_drm_tree(const std::vector<GpuInfo> &gpus) {
   write_file(drm_dir_ + "/version", "drm 1.1.0\n");
 }
 
-std::string Sysfs::generate(const GpuInfo &gpu) { return generate(std::vector<GpuInfo>{gpu}); }
+std::string Sysfs::generate(const GpuInfo &gpu, const std::string &runtime_root) {
+  return generate(std::vector<GpuInfo>{gpu}, true, runtime_root);
+}
 
-std::string Sysfs::generate(const std::vector<GpuInfo> &gpus, bool publish_peer_links) {
+std::string Sysfs::generate(const std::vector<GpuInfo> &gpus, bool publish_peer_links,
+                            const std::string &runtime_root) {
   cleanup();
 
   static std::once_flag reap_once;
-  std::call_once(reap_once, reap_stale_sysfs_dirs);
+  if (runtime_root.empty())
+    std::call_once(reap_once, reap_stale_sysfs_dirs);
 
-  topology_dir_ = make_tagged_dir("topology");
+  const std::string root = runtime_root.empty() ? rpc_default_runtime_dir() : runtime_root;
+  topology_dir_ = make_tagged_dir("topology", root);
   if (topology_dir_.empty())
     return {};
 
@@ -555,7 +559,7 @@ std::string Sysfs::generate(const std::vector<GpuInfo> &gpus, bool publish_peer_
   for (uint32_t i = 0; i < num_gpus; ++i)
     write_gpu_node(nodes_dir, i + 1, gpus[i], num_gpus, publish_peer_links);
 
-  write_drm_tree(gpus);
+  write_drm_tree(gpus, root);
 
   return topology_dir_;
 }

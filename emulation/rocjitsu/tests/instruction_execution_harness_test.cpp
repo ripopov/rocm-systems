@@ -4449,7 +4449,7 @@ TEST(Gfx1250True16Vop3Test, SelectedHalfArithmeticPreservesDestinationHalf) {
     cu->write_vgpr(v3, lane, 0xBEEF0007u);
   }
 
-  auto execute = [&](const uint32_t(&words)[2], std::string_view mnemonic) {
+  auto execute = [&](const uint32_t (&words)[2], std::string_view mnemonic) {
     std::unique_ptr<Instruction> inst(decode_valid(*decoder, words));
     ASSERT_NE(inst, nullptr);
     ASSERT_EQ(std::string_view(inst->mnemonic()), mnemonic);
@@ -6356,7 +6356,7 @@ TEST(Gfx1250True16Vop3Test, Bitop3B16UsesSelectedSourceHalfAndPreservesDestinati
     cu->write_vgpr(v8, lane, 0x55550014u);
   }
 
-  auto execute = [&](const uint32_t(&words)[2], std::string_view mnemonic) {
+  auto execute = [&](const uint32_t (&words)[2], std::string_view mnemonic) {
     std::unique_ptr<Instruction> inst(decode_valid(*decoder, words));
     ASSERT_NE(inst, nullptr);
     ASSERT_EQ(std::string_view(inst->mnemonic()), mnemonic);
@@ -7747,6 +7747,51 @@ TEST(Cdna3CvtFp8Test, Bf8AndStochasticPathsHonorFp16OvflMode) {
 
   if (!wf->is_halted())
     wf->halt();
+}
+
+TEST(Cdna4CvtScaleTest, WideningSelectsEverySourceByte) {
+  amdgpu::GpuMemory gpu_mem("cdna4_cvt_scale_byte_mem");
+  amdgpu::L2Cache l2("cdna4_cvt_scale_byte_l2");
+  amdgpu::ComputeUnitCore::Config cfg{};
+  cfg.arch = ROCJITSU_CODE_ARCH_CDNA4;
+  cfg.num_wf_slots = 1;
+  cfg.sgprs_per_wf = 106;
+  cfg.vgprs_per_wf = 256;
+  cfg.lds_size_kb = 64;
+  auto cu = amdgpu::ComputeUnitCore::create("cdna4", cfg, &gpu_mem, &l2);
+  ASSERT_NE(cu, nullptr);
+  auto decoder = Decoder::create(ROCJITSU_CODE_ARCH_CDNA4);
+  ASSERT_NE(decoder, nullptr);
+  auto *wf = cu->dispatch_wf(0, 0, cfg.sgprs_per_wf, cfg.vgprs_per_wf);
+  ASSERT_NE(wf, nullptr);
+  wf->set_exec(1);
+  const uint32_t vb = wf->vgpr_alloc().base;
+  cu->write_vgpr(vb + 6, 0, std::bit_cast<uint32_t>(1.0f));
+
+  for (const bool bf8 : {false, true}) {
+    // Distinct, exactly representable values in each byte: 1, 2, 3, 4.
+    cu->write_vgpr(vb + 5, 0, bf8 ? 0x4442403Cu : 0x48444038u);
+    for (const bool half : {false, true}) {
+      const uint32_t opcode =
+          half ? (bf8 ? cdna4::kVCvtScalef32F16Bf8Vop3 : cdna4::kVCvtScalef32F16Fp8Vop3)
+               : (bf8 ? cdna4::kVCvtScalef32F32Bf8Vop3 : cdna4::kVCvtScalef32F32Fp8Vop3);
+      for (uint32_t byte = 0; byte < 4; ++byte) {
+        SCOPED_TRACE(::testing::Message() << "bf8=" << bf8 << " half=" << half << " byte=" << byte);
+        // LLVM's SrcAndDstSelToOpSelXForm: halfword in OPSEL[0], byte in OPSEL[1].
+        const uint32_t opsel = (byte >> 1) | ((byte & 1u) << 1);
+        const auto words = encode_cdna_vop3(opcode, 2, vgpr_src(5), vgpr_src(6), 0, opsel);
+        std::unique_ptr<Instruction> inst(decode_valid(*decoder, words.data()));
+        ASSERT_NE(inst, nullptr);
+        cu->write_vgpr(vb + 2, 0, 0xA5A5BEEFu);
+        ASSERT_TRUE(cu->execute_instruction(inst.get(), *wf).succeeded());
+        const uint32_t half_values[] = {0x3C00u, 0x4000u, 0x4200u, 0x4400u};
+        const uint32_t expected =
+            half ? (0xA5A50000u | half_values[byte]) : std::bit_cast<uint32_t>(float(byte + 1));
+        EXPECT_EQ(cu->read_vgpr(vb + 2, 0), expected);
+      }
+    }
+  }
+  wf->halt();
 }
 
 TEST(Cdna4CvtScaleTest, ScaledFp8Bf8OverflowHonorsFp16OvflMode) {

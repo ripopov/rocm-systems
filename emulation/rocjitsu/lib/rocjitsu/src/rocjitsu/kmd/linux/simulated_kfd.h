@@ -1,20 +1,17 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-#pragma once
+#ifndef ROCJITSU_KMD_LINUX_SIMULATED_KFD_H_
+#define ROCJITSU_KMD_LINUX_SIMULATED_KFD_H_
 
 #include "rocjitsu/base/rj_compiler.h"
-#include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/config/kfd_device_config.h"
+#include "rocjitsu/kmd/device/device_backend.h"
 #include "rocjitsu/kmd/linux/kfd_process.h"
-#include "rocjitsu/kmd/linux/legacy_gpu_vm.h"
 #include "rocjitsu/kmd/linux/linux_kfd.h"
 #include "rocjitsu/kmd/linux/sysfs.h"
-#include "rocjitsu/vm/amdgpu/instruction_compute_unit_view.h"
 #include "rocjitsu/vm/amdgpu/interrupt_sink.h"
-#include "rocjitsu/vm/amdgpu/pm4/pm4.h"
-#include "rocjitsu/vm/soc.h"
-
-#include "simdojo/sim/simulation.h"
+#include "rocjitsu/vm/amdgpu/queue_exception.h"
 
 RJ_DIAGNOSTIC_PUSH
 RJ_DIAGNOSTIC_IGNORE_PEDANTIC
@@ -32,15 +29,16 @@ RJ_DIAGNOSTIC_POP
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 namespace rocjitsu {
 
 namespace amdgpu {
+struct Pm4Submission;
 class Wavefront;
-}
+} // namespace amdgpu
 
 namespace kmd {
+class SimdojoDeviceBackend;
 struct CwsrWaveState;
 
 namespace detail {
@@ -114,6 +112,7 @@ classify_pre_gfx12_trap_interrupt_site(rj_code_arch_t arch, uint32_t payload_mov
 
 } // namespace detail
 } // namespace kmd
+class SoC;
 /// @brief 128-bit IPC share handle key, matching the kernel's random handle.
 struct IpcHandleKey {
   uint32_t words[4];
@@ -135,6 +134,8 @@ struct IpcObject {
   uint32_t share_handle[4];
   int backing_memfd = -1;
   std::shared_ptr<GemObject> bo_state;
+  uint64_t backing_offset = 0;
+  std::shared_ptr<kmd::DeviceAllocation> device_allocation;
   uint64_t allocation_size = 0;
   uint32_t allocation_flags = 0;
   uint32_t source_gpu_id = 0;
@@ -155,10 +156,7 @@ struct IpcObject {
 /// shared mutable state.
 class SimulatedKfd : public LinuxKfd {
 public:
-  /// Minimum backing descriptor requested when the process limit permits it.
-  /// Shared with the interposer so its early table growth covers this range.
   static constexpr int kBackingFdMin = 4096;
-
   /// @brief Test seam invoked between procfs authorization and pidfd revalidation.
   using DebugIdentityValidationHook = std::function<void()>;
 
@@ -168,6 +166,12 @@ public:
                DebugIdentityValidationHook debug_identity_validation_hook = {});
   SimulatedKfd(std::vector<SoC *> socs, std::vector<uint32_t> gpu_ids, bool daemon_mode = false,
                DebugIdentityValidationHook debug_identity_validation_hook = {});
+  struct BackendDevice {
+    uint32_t gpu_id;
+    std::unique_ptr<kmd::DeviceBackend> backend;
+  };
+  explicit SimulatedKfd(std::vector<BackendDevice> devices, bool daemon_mode = true,
+                        DebugIdentityValidationHook debug_identity_validation_hook = {});
   ~SimulatedKfd() override;
 
   /// @brief Local-mode interface (interposer). Operates on the local process.
@@ -324,21 +328,17 @@ public:
   /// device that faulted: the runtime maps gpu_id to a node and surfaces it, so
   /// a shared reporter that guessed would misattribute a fault from any device
   /// but the first.
-  class GpuFaultReporter : public amdgpu::MemoryFaultReporter {
+  class GpuFaultReporter : public kmd::MemoryFaultReporter {
   public:
-    GpuFaultReporter(SimulatedKfd *driver, uint32_t gpu_id, std::shared_ptr<KfdProcess> process)
-        : driver_(driver), gpu_id_(gpu_id), process_(std::move(process)) {}
+    GpuFaultReporter(SimulatedKfd *driver, uint32_t gpu_id) : driver_(driver), gpu_id_(gpu_id) {}
 
-    void report_memory_fault(uint32_t vmid, uint64_t addr,
-                             amdgpu::MemoryFaultCause cause) override {
-      if (process_ != nullptr && process_->process_id() == vmid)
-        driver_->report_memory_fault(process_, addr, gpu_id_, cause);
+    void report_memory_fault(uint32_t vmid, uint64_t addr, kmd::MemoryFaultCause cause) override {
+      driver_->report_memory_fault(vmid, addr, gpu_id_, cause);
     }
 
   private:
     SimulatedKfd *driver_ = nullptr;
     uint32_t gpu_id_ = 0;
-    std::shared_ptr<KfdProcess> process_;
   };
 
   /// @brief Deliver a GPU memory violation to the faulting process.
@@ -348,8 +348,8 @@ public:
   /// policy here is what makes an invalid GPU access behave as it would on
   /// silicon. A process that registered no such event gets a warning instead,
   /// because the violation would otherwise vanish silently.
-  void report_memory_fault(const std::shared_ptr<KfdProcess> &process, uint64_t addr,
-                           uint32_t gpu_id, amdgpu::MemoryFaultCause cause);
+  void report_memory_fault(uint32_t vmid, uint64_t addr, uint32_t gpu_id,
+                           kmd::MemoryFaultCause cause);
 
   int ioctl(uint32_t process_id, unsigned long request, void *arg, int *target_mem_fd = nullptr,
             int target_proc_fd = -1);
@@ -363,13 +363,15 @@ public:
   /// WAIT_EVENTS unblock and their jthread joins can complete.
   void close_all_processes();
 
-  [[nodiscard]] int get_mmap_memfd(uint32_t process_id, off_t offset) const;
+  [[nodiscard]] int get_mmap_memfd(uint32_t process_id, off_t offset,
+                                   uint64_t *backing_offset = nullptr,
+                                   uint64_t *backing_size = nullptr) const;
   /// @}
 
   /// @brief Local-mode get_mmap_memfd (uses local process).
   [[nodiscard]] int get_mmap_memfd(off_t offset) const;
 
-  void setup_topology(const Sysfs::GpuInfo &gpu);
+  void setup_topology(const Sysfs::GpuInfo &gpu, const std::string &runtime_root = {});
   void setup_topology(const config::KfdDeviceConfig &dev, uint32_t num_xcc,
                       const config::PciDeviceConfig &pci = {});
   void setup_topology(const std::vector<config::KfdDeviceConfig> &devs, uint32_t num_xcc,
@@ -389,6 +391,8 @@ public:
                                              off_t offset) override;
 
   uint32_t gpu_id() const { return gpus_.empty() ? 0 : gpus_[0].gpu_id; }
+  int submit_pm4(uint32_t render_minor, uint64_t queue_key, amdgpu::Pm4Submission submission);
+  void retire_pm4_queue(uint64_t queue_key);
   uint32_t num_gpus() const { return static_cast<uint32_t>(gpus_.size()); }
   const Sysfs::GpuInfo *gpu_info_at(uint32_t ordinal) const {
     return ordinal < gpu_infos_.size() ? &gpu_infos_[ordinal] : nullptr;
@@ -454,9 +458,7 @@ public:
   /// COHERENT for the interposer's GEM_VA path.
   static amdgpu::Mtype pte_mtype_for_flags(uint32_t alloc_flags, bool shared = false);
   /// @brief Submit compute IBs to the CP assigned to a DRM file/context/ring key.
-  int submit_pm4(uint32_t render_minor, uint64_t queue_key, amdgpu::Pm4Submission submission);
   /// Cancel accepted work and release the queue owned by one DRM context/ring.
-  void retire_pm4_queue(uint64_t queue_key);
 
   /// @brief Install a host range into the local process's GPU page table.
   /// @details Drives DRM AMDGPU_GEM_VA MAP/REPLACE from the interposer: maps
@@ -502,12 +504,10 @@ public:
 
   /// @brief Per-GPU device state (mirrors kfd_dev in the kernel).
   struct GpuDevice {
-    SoC *soc = nullptr;
+    std::unique_ptr<kmd::DeviceBackend> backend;
     uint32_t gpu_id = 0;
-    /// Legacy KFD binding factory layered over the frontend-neutral VM service.
-    std::unique_ptr<amdgpu::LegacyGpuVmAdapter> legacy_vm;
-    /// One revocable route owned by this frontend and carried only by its queues.
-    amdgpu::InterruptSubscription interrupt_subscription;
+    /// Fault reporter bound to this device, so a violation names its own GPU.
+    std::unique_ptr<GpuFaultReporter> fault_reporter;
     bool cps_initialized = false;
     /// Whether the "no CWSR layout for this architecture" warning has been
     /// logged for this GPU. The check now runs per faulting access rather than
@@ -527,7 +527,13 @@ private:
   /// registration unwinds every memory and VM registration made for @p proc.
   [[nodiscard]] bool register_process_address_spaces(const std::shared_ptr<KfdProcess> &proc,
                                                      pid_t client_pid, bool passthrough);
+  /// @brief Lazily create @p gpu's bound reporter, so a fault names its device.
+  GpuFaultReporter *fault_reporter_for(GpuDevice &gpu);
 
+private:
+  friend class kmd::SimdojoDeviceBackend;
+  /// Install a process on every device, rolling back on the first failure.
+  int register_device_process(KfdProcess &process, bool passthrough);
   /// @brief Look up the local-mode process.
   std::shared_ptr<KfdProcess> find_local_process() const;
 
@@ -571,7 +577,8 @@ private:
   void *dispatch_mmap(KfdProcess &proc, void *addr, size_t length, int prot, int flags,
                       off_t offset);
   int dispatch_munmap(KfdProcess &proc, void *addr, size_t length);
-  int dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset) const;
+  int dispatch_get_mmap_memfd(KfdProcess &proc, off_t offset, uint64_t *backing_offset,
+                              uint64_t *backing_size) const;
 
   int get_process_apertures_ioctl(void *arg) override;
   int acquire_vm_ioctl(void *arg) override;
@@ -626,8 +633,8 @@ private:
   ///        that is already exiting, so parking it there parks the client.
   void runtime_debugger_handshake(pid_t target_pid, bool enabling);
 
-  std::optional<amdgpu::ComputeUnitCore::TrapHandlerConfig>
-  resolve_trap_handler(const amdgpu::Wavefront &wf, uint32_t gpu_ordinal);
+  std::optional<kmd::DeviceTrapHandler> resolve_trap_handler(uint32_t process_id,
+                                                             uint32_t gpu_ordinal);
   bool on_wave_sendmsg(amdgpu::Wavefront &wf, uint32_t message);
   void on_wave_trap_complete(amdgpu::Wavefront &wf);
   uint64_t debugger_queue_exception_mask(const std::shared_ptr<KfdProcess> &proc, uint32_t queue_id,
@@ -688,8 +695,6 @@ private:
   /// @param gpu_id KFD GPU id of the queue whose wave would stop.
   bool debug_stop_publishable(uint32_t gpu_id);
   int resume_debug_queues(KfdProcess *proc, uint32_t *queue_ids, uint32_t num_queues);
-  void apply_cwsr_to_wave(amdgpu::Wavefront &wf, const kmd::CwsrWaveState &state,
-                          rj_code_arch_t arch);
 
   /// @brief Address-watchpoint handler installed on every compute unit.
   /// @details Runs on the engine thread for each active-lane global-memory
@@ -818,8 +823,6 @@ private:
   /// interrupt_mutex_ is a leaf: the CP interrupt callback takes it and only
   /// descends into EventState::mutex_, and close() takes it only after releasing
   /// process_mutex_, so there is no cycle.
-  /// PM4 registration/enqueue takes pm4_mutex_ -> hw_queue_mutex_. Neither the
-  /// engine nor code holding process_mutex_ acquires pm4_mutex_.
   /// The CP engine thread acquires hw_queue_mutex_ first, then reaches
   /// process_mutex_ (scratch resolver) or alloc_mutex_ (scratch allocator) through
   /// the callbacks — hw_queue_mutex_ -> process_mutex_ and, separately,
@@ -828,19 +831,7 @@ private:
   /// CommandProcessor call that takes hw_queue_mutex_ (e.g. register_queue) — build
   /// state under alloc_mutex_, release it, then call the CP.
   mutable std::mutex process_mutex_;
-
-  /// @brief PM4 queue registry; nests outside CP queue locks, never inside process_mutex_.
-  /// The engine does not acquire this mutex when completing a submission.
-  std::mutex pm4_mutex_;
-  std::unordered_map<uint64_t, std::pair<amdgpu::CommandProcessor *, uint32_t>> pm4_queues_;
-  static constexpr uint32_t kPm4QueueIdBase = 0x80000000; ///< Separate from KFD queue IDs.
-  uint32_t next_pm4_queue_id_ = kPm4QueueIdBase;
   std::unordered_map<uint32_t, std::shared_ptr<KfdProcess>> processes_;
-  // Hardware-visible VMIDs/PASIDs share the SoC namespace even when tests or
-  // an embedder attach more than one KFD frontend to that SoC. A per-driver
-  // counter would let two live frontends publish the same numeric identity and
-  // silently replace each other's memory binding.
-  inline static std::atomic<uint32_t> next_process_id_{1};
 
   /// @brief Debugger sessions keyed by the target inferior's Linux pid.
   /// @details Decoupled from KfdProcess so a debugger (rocgdb) can enable a
@@ -938,3 +929,5 @@ private:
 };
 
 } // namespace rocjitsu
+
+#endif // ROCJITSU_KMD_LINUX_SIMULATED_KFD_H_

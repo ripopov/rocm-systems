@@ -26,6 +26,8 @@
 
 namespace rocjitsu {
 
+struct RpcSharedBacking;
+
 /// @brief What Yama's ptrace_scope implies for the daemon's cross-process reads.
 /// @details Only one of these states makes the grant both necessary and
 /// sufficient, and the others are not interchangeable: two of them mean the
@@ -195,7 +197,9 @@ public:
 
 private:
   int send_ioctl(unsigned long request, void *arg);
-  int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset, int *memfd_out);
+  int send_ioctl_locked(unsigned long request, void *arg);
+  int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset, int *memfd_out,
+                RpcSharedBacking *backing_out);
 
   /// @brief Mark the RPC stream unusable and make the connection terminal.
   /// @details Called from every framing failure — a half-written request, a
@@ -236,7 +240,14 @@ private:
   std::mutex rpc_mutex_;
 
   /// @brief Memfds received from the daemon during ALLOC_MEMORY, keyed by handle.
-  std::unordered_map<uint64_t, int> handle_memfds_;
+  struct AllocationBacking {
+    int fd;
+    uint64_t offset;
+    uint64_t size;
+    uint64_t userptr_address = 0;
+    uint64_t userptr_size = 0;
+  };
+  std::unordered_map<uint64_t, AllocationBacking> handle_memfds_;
 
   /// @brief Maps GPUVM addresses to allocation memfds for anonymous MAP_FIXED
   /// interception. When ROCR's FMM does anonymous MAP_FIXED at a GPUVM address
@@ -246,6 +257,7 @@ private:
     uint64_t va;
     uint64_t size;
     int memfd;
+    uint64_t backing_offset;
   };
   std::vector<AllocRange> alloc_ranges_;
 };

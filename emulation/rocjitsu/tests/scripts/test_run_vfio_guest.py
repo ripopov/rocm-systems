@@ -525,11 +525,28 @@ class RunVfioGuestTest(unittest.TestCase):
                 0o755,
             )
 
-            with self.assertRaisesRegex(
-                RUNNER.GuestRunError, "test probe did not complete within 0.05 seconds"
+            # Capture the child at spawn: under load the timeout can expire
+            # before Python starts and writes its PID file.
+            spawn = RUNNER.subprocess.Popen
+            children = []
+
+            def capture_child(*args, **kwargs):
+                child = spawn(*args, **kwargs)
+                children.append(child)
+                return child
+
+            with mock.patch.object(
+                RUNNER.subprocess, "Popen", side_effect=capture_child
             ):
-                RUNNER.run_capability_probe([str(probe)], "test probe", 0.05)
-            self.assert_fake_process_reaped(root, "probe")
+                with self.assertRaisesRegex(
+                    RUNNER.GuestRunError,
+                    "test probe did not complete within 0.05 seconds",
+                ):
+                    RUNNER.run_capability_probe([str(probe)], "test probe", 0.05)
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].returncode)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(children[0].pid, os.WNOHANG)
 
     def test_sigterm_in_capability_probe_spawn_window_reaps_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

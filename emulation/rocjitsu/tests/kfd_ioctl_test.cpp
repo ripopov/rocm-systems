@@ -3863,6 +3863,7 @@ TEST_F(KfdIoctlTest, GetTileConfigRejectsUnknownGpuId) {
 
 TEST_F(KfdIoctlTest, GetTileConfigReturnsUnsupportedInDaemonMode) {
   ASSERT_NE(soc_, nullptr);
+  ASSERT_EQ(driver_->close(), 0);
   rocjitsu::SimulatedKfd daemon_driver(*soc_, true);
   uint32_t process_id = daemon_driver.open_process();
   ASSERT_NE(process_id, 0u);
@@ -5002,8 +5003,8 @@ TEST_F(KfdIoctlTest, DbgTrapNotifierChildDoesNotRunApplicationSignalHandler) {
   enable.enable.exception_mask = KFD_EC_MASK(EC_PROCESS_RUNTIME);
   ASSERT_EQ(driver_->ioctl(AMDKFD_IOC_DBG_TRAP, &enable), 0);
 
-  struct sigaction action {};
-  struct sigaction previous_action {};
+  struct sigaction action{};
+  struct sigaction previous_action{};
   action.sa_handler = record_notification_signal;
   sigemptyset(&action.sa_mask);
   ASSERT_EQ(::sigaction(SIGPIPE, &action, &previous_action), 0);
@@ -6540,8 +6541,8 @@ TEST_F(DbgTrapDaemonTest, EnableRejectsAMemFdForADifferentProcess) {
 
   const std::string other_mem = std::format("/proc/{}/mem", other);
   // Confirm the premise: procfs gives it a different inode from our own.
-  struct stat ours {};
-  struct stat theirs {};
+  struct stat ours{};
+  struct stat theirs{};
   const util::UniqueHandle self_mem{::open("/proc/self/mem", O_RDWR | O_CLOEXEC)};
   ASSERT_GE(self_mem.get(), 0);
   const util::UniqueHandle their_mem{::open(other_mem.c_str(), O_RDWR | O_CLOEXEC)};
@@ -8166,6 +8167,204 @@ TEST(RemoteDriverDbgEnableTest, FailedEnableLeavesCallerRuntimeInfoUntouched) {
 
   ::close(notifier_fd);
   server.join();
+}
+
+// SCM_RIGHTS creates a new descriptor for each mmap reply. It is not the
+// allocation's cached descriptor: the client must release it after mapping,
+// including failures, while the mapping itself keeps the file alive.
+void check_mmap_reply_descriptor_lifetime(bool local_failure, int daemon_result,
+                                          uint64_t backing_offset = 0,
+                                          size_t requested_length = 4096) {
+  int sv[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+  const CloseOnScopeExit server_closer{sv[1]};
+  rocjitsu::RemoteDriver rd(sv[0]);
+  int backing = static_cast<int>(::syscall(SYS_memfd_create, "mmap_reply_lifetime", MFD_CLOEXEC));
+  ASSERT_GE(backing, 0);
+  const CloseOnScopeExit backing_closer{backing};
+  ASSERT_EQ(::ftruncate(backing, 16384), 0);
+  const uint64_t marker = 0x123456789abcdef0ULL;
+  ASSERT_EQ(::pwrite(backing, &marker, sizeof(marker), backing_offset), sizeof(marker));
+
+  // With no worker threads, the next received descriptor occupies this slot.
+  int next_fd = ::fcntl(backing, F_DUPFD_CLOEXEC, 0);
+  ASSERT_GE(next_fd, 0);
+  ASSERT_EQ(::close(next_fd), 0);
+  for (unsigned iteration = 0; iteration < 8; ++iteration) {
+    SCOPED_TRACE(iteration);
+    rocjitsu::RpcHeader reply{};
+    reply.opcode = rocjitsu::RPC_MMAP;
+    reply.payload_bytes = sizeof(rocjitsu::RpcMmapResponse);
+    reply.result = daemon_result;
+    rocjitsu::RpcMmapResponse body{};
+    body.backing = {backing_offset, 4096};
+    std::array<uint8_t, sizeof(reply) + sizeof(body)> bytes{};
+    std::memcpy(bytes.data(), &reply, sizeof(reply));
+    std::memcpy(bytes.data() + sizeof(reply), &body, sizeof(body));
+    ASSERT_EQ(rocjitsu::rpc_send_msg(sv[1], bytes.data(), bytes.size(), &backing, 1),
+              static_cast<ssize_t>(bytes.size()));
+
+    void *mapped = rd.mmap(nullptr, requested_length, PROT_READ | PROT_WRITE, MAP_SHARED, 0);
+    int map_errno = errno;
+    if (local_failure || daemon_result != 0) {
+      EXPECT_EQ(mapped, MAP_FAILED);
+      EXPECT_EQ(map_errno, daemon_result != 0 ? -daemon_result : EINVAL);
+    } else {
+      ASSERT_NE(mapped, MAP_FAILED);
+      EXPECT_EQ(*static_cast<uint64_t *>(mapped), marker);
+      ASSERT_EQ(::munmap(mapped, 4096), 0);
+    }
+    int slot_state = ::fcntl(next_fd, F_GETFD);
+    EXPECT_EQ(slot_state, -1) << "mmap retained the SCM_RIGHTS descriptor";
+    EXPECT_EQ(errno, EBADF);
+    if (slot_state >= 0)
+      ::close(next_fd);
+    EXPECT_GE(::fcntl(backing, F_GETFD), 0) << "the sender's backing must remain owned";
+    struct stat st{};
+    ASSERT_EQ(::fstat(backing, &st), 0);
+    EXPECT_EQ(st.st_size, 16384) << "the client resized server-owned backing";
+
+    std::array<uint8_t, sizeof(rocjitsu::RpcHeader) + sizeof(rocjitsu::RpcMmapRequest)> request;
+    ASSERT_TRUE(rocjitsu::rpc_recv_exact(sv[1], request.data(), request.size()));
+  }
+}
+
+TEST(RemoteDriverBackingTest, SuccessfulMmapReleasesReplyDescriptor) {
+  check_mmap_reply_descriptor_lifetime(false, 0);
+}
+
+TEST(RemoteDriverBackingTest, FailedLocalMmapReleasesReplyDescriptor) {
+  check_mmap_reply_descriptor_lifetime(true, 0, 0, 0);
+}
+
+TEST(RemoteDriverBackingTest, FailedDaemonMmapReleasesReplyDescriptor) {
+  check_mmap_reply_descriptor_lifetime(false, -ENOMEM);
+}
+
+TEST(RemoteDriverBackingTest, MmapUsesNonzeroSliceOffsetWithoutResizingBacking) {
+  check_mmap_reply_descriptor_lifetime(false, 0, 8192);
+}
+
+TEST(RemoteDriverBackingTest, MmapCannotExtendBeyondItsSliceIntoAdjacentBacking) {
+  check_mmap_reply_descriptor_lifetime(true, 0, 8192, 8192);
+}
+
+enum class AllocationRelease { Free, Close, Destroy };
+
+void check_allocation_slice(bool userptr, AllocationRelease release = AllocationRelease::Free) {
+  int sv[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+  const CloseOnScopeExit server_closer{sv[1]};
+  auto rd = std::make_unique<rocjitsu::RemoteDriver>(sv[0]);
+  int backing = static_cast<int>(::syscall(SYS_memfd_create, "allocation_slice", MFD_CLOEXEC));
+  ASSERT_GE(backing, 0);
+  const CloseOnScopeExit backing_closer{backing};
+  ASSERT_EQ(::ftruncate(backing, 16384), 0);
+  const uint64_t marker = 0xabcddcba12344321ULL;
+  ASSERT_EQ(::pwrite(backing, &marker, sizeof(marker), 8192), sizeof(marker));
+  auto *original =
+      ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(original, MAP_FAILED);
+  *static_cast<uint64_t *>(original) = marker + 1;
+
+  kfd_ioctl_alloc_memory_of_gpu_args allocation{};
+  allocation.handle = 42;
+  allocation.mmap_offset = allocation.handle << 12;
+  // USERPTR can register a CPU buffer at a different GPU virtual address.
+  allocation.va_addr = userptr ? 0x123400000000ULL : reinterpret_cast<uint64_t>(original);
+  allocation.size = 4096;
+  allocation.flags = userptr ? KFD_IOC_ALLOC_MEM_FLAGS_USERPTR : KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  rocjitsu::RpcHeader header{};
+  header.opcode = rocjitsu::RPC_IOCTL;
+  const rocjitsu::RpcSharedBacking slice{8192, 4096};
+  header.payload_bytes = sizeof(slice) + sizeof(allocation);
+  std::array<uint8_t, sizeof(header) + sizeof(slice) + sizeof(allocation)> response{};
+  std::memcpy(response.data(), &header, sizeof(header));
+  std::memcpy(response.data() + sizeof(header), &slice, sizeof(slice));
+  std::memcpy(response.data() + sizeof(header) + sizeof(slice), &allocation, sizeof(allocation));
+  ASSERT_EQ(rocjitsu::rpc_send_msg(sv[1], response.data(), response.size(), &backing, 1),
+            static_cast<ssize_t>(response.size()));
+  if (userptr)
+    allocation.mmap_offset = reinterpret_cast<uint64_t>(original);
+  ASSERT_EQ(rd->ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &allocation), 0);
+  int lookup_fd = -1;
+  off_t lookup_offset = 0;
+  ASSERT_EQ(
+      rd->find_memfd_for_addr(static_cast<char *>(original) + 128, 256, &lookup_fd, &lookup_offset),
+      rocjitsu::RemoteDriver::MemfdLookup::kFound);
+  const CloseOnScopeExit lookup_closer{lookup_fd};
+  EXPECT_EQ(lookup_offset, 8192 + 128);
+
+  // A reply without another descriptor uses the allocation's cached slice.
+  header.opcode = rocjitsu::RPC_MMAP;
+  header.payload_bytes = sizeof(rocjitsu::RpcMmapResponse);
+  const rocjitsu::RpcMmapResponse map_reply{};
+  ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
+  ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &map_reply, sizeof(map_reply)));
+  auto *mapped =
+      rd->mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, allocation.mmap_offset);
+  ASSERT_NE(mapped, MAP_FAILED);
+  EXPECT_EQ(*static_cast<uint64_t *>(mapped), marker + (userptr ? 1 : 0));
+  if (userptr) {
+    *static_cast<uint64_t *>(mapped) = marker + 2;
+    EXPECT_EQ(*static_cast<uint64_t *>(original), marker + 2);
+  }
+  EXPECT_GE(::fcntl(lookup_fd, F_GETFD), 0);
+  ASSERT_EQ(::munmap(mapped, 4096), 0);
+  if (release == AllocationRelease::Close) {
+    ASSERT_EQ(rd->close(), 0);
+    ASSERT_EQ(rd->close(), 0);
+  } else if (release == AllocationRelease::Destroy) {
+    rd.reset();
+  } else {
+    kfd_ioctl_free_memory_of_gpu_args free_args{};
+    free_args.handle = allocation.handle;
+    header.opcode = rocjitsu::RPC_IOCTL;
+    header.payload_bytes = sizeof(free_args);
+    if (userptr) {
+      header.result = -EBUSY;
+      ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
+      ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
+      ASSERT_EQ(rd->ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), -EBUSY);
+      const uint64_t still_shared = marker + 3;
+      ASSERT_EQ(::pwrite(backing, &still_shared, sizeof(still_shared), 8192), sizeof(still_shared));
+      EXPECT_EQ(*static_cast<uint64_t *>(original), still_shared);
+      *static_cast<uint64_t *>(original) = marker + 2;
+      header.result = 0;
+    }
+    ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &header, sizeof(header)));
+    ASSERT_TRUE(rocjitsu::rpc_send_exact(sv[1], &free_args, sizeof(free_args)));
+    ASSERT_EQ(rd->ioctl(AMDKFD_IOC_FREE_MEMORY_OF_GPU, &free_args), 0);
+  }
+  if (userptr) {
+    const uint64_t reused = 0xdeadbeef;
+    ASSERT_EQ(::pwrite(backing, &reused, sizeof(reused), 8192), sizeof(reused));
+    EXPECT_EQ(*static_cast<uint64_t *>(original), marker + 2)
+        << "released backend storage must no longer alias caller-owned memory";
+  }
+  ASSERT_EQ(::munmap(original, 4096), 0);
+  struct stat st{};
+  ASSERT_EQ(::fstat(backing, &st), 0);
+  EXPECT_EQ(st.st_size, 16384);
+  uint64_t untouched = 1;
+  ASSERT_EQ(::pread(backing, &untouched, sizeof(untouched), 0), sizeof(untouched));
+  EXPECT_EQ(untouched, 0) << "slice writes corrupted the start of the backing file";
+}
+
+TEST(RemoteDriverBackingTest, AllocationLookupAndCachedMmapPreserveSliceOffset) {
+  check_allocation_slice(false);
+}
+
+TEST(RemoteDriverBackingTest, UserptrPromotionWritesOnlyItsBackingSlice) {
+  check_allocation_slice(true);
+}
+
+TEST(RemoteDriverBackingTest, ClosePreservesLiveUserptrMemory) {
+  check_allocation_slice(true, AllocationRelease::Close);
+}
+
+TEST(RemoteDriverBackingTest, DestructionPreservesLiveUserptrMemory) {
+  check_allocation_slice(true, AllocationRelease::Destroy);
 }
 
 // --- RemoteDriver RPC stream poisoning ---

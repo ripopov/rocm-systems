@@ -62,17 +62,22 @@ typedef struct rj_vm_cmd_t {
   rj_handle_t in_handle;      ///< [in,out] Client-provided fd (e.g. debugger notifier), or -1.
   rj_handle_t in_mem_handle;  ///< [in,out] Debugger-authorized target /proc/pid/mem fd, or -1.
   rj_handle_t in_proc_handle; ///< [in] Pinned target /proc/pid directory fd, or -1.
+  uint64_t shared_offset;     ///< [out] Byte offset of shared backing in shared_handle.
+  uint64_t shared_size;       ///< [out] Accessible backing length, not the whole file size.
 } rj_vm_cmd_t;
 
 /// @brief Device memory mapping descriptor.
 typedef struct rj_vm_map_t {
-  uint64_t addr;        ///< Requested mapping address.
-  uint64_t length;      ///< Length in bytes to map.
-  int64_t offset;       ///< Platform-specific offset encoding.
-  uint32_t prot;        ///< Memory protection flags.
-  uint32_t flags;       ///< Mapping flags.
-  uint64_t mapped_addr; ///< [out] Address the mapping was placed at.
-  int32_t map_errno;    ///< [out] errno captured at the failing mmap (0 on success).
+  uint64_t addr;             ///< Requested mapping address.
+  uint64_t length;           ///< Length in bytes to map.
+  int64_t offset;            ///< Platform-specific offset encoding.
+  uint32_t prot;             ///< Memory protection flags.
+  uint32_t flags;            ///< Mapping flags.
+  uint64_t mapped_addr;      ///< [out] Address the mapping was placed at.
+  int32_t map_errno;         ///< [out] errno captured at the failing mmap (0 on success).
+  rj_handle_t shared_handle; ///< [out] Borrowed backing descriptor, or -1.
+  uint64_t shared_offset;    ///< [out] Byte offset of the backing range in shared_handle.
+  uint64_t shared_size;      ///< [out] Accessible backing length.
 } rj_vm_map_t;
 
 /// @brief Device memory unmapping descriptor.

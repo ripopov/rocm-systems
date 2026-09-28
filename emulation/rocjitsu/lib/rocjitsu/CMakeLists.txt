@@ -30,6 +30,11 @@ target_include_directories(
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
+if(RJ_KMD_SERVER_ONLY)
+    add_subdirectory(src/rocjitsu/kmd)
+    return()
+endif()
+
 add_subdirectory(src/rocjitsu/code/analysis)
 add_subdirectory(src/rocjitsu/code)
 add_subdirectory(src/rocjitsu/isa)
