@@ -5,8 +5,10 @@
 /// @brief Tests for SimulatedKfd creation, open/close, and topology generation.
 
 #include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/guest_kfd.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
+#include "rocjitsu/vm/amdgpu/gpu_vm.h"
 #include "rocjitsu/vm/rj_vm.h"
 #include "rocjitsu/vm/rj_vm_impl.h"
 #include "rocjitsu/vm/virtual_machine.h"
@@ -16,6 +18,8 @@ RJ_DIAGNOSTIC_PUSH
 RJ_DIAGNOSTIC_IGNORE_PEDANTIC
 #include "linux/uapi/kfd_ioctl.h"
 RJ_DIAGNOSTIC_POP
+
+#include <system_error>
 
 #include "embedded_schema.h"
 #include "rocjitsu/kmd/linux/host_mapping_lock.h"
@@ -105,6 +109,37 @@ protected:
   void SetUp() override { setenv("RJ_CONFIG", CONFIG_PATH.c_str(), 1); }
 };
 
+TEST_F(SimulatedKfdTest, UserptrUsesCpuAddressRatherThanGpuAddress) {
+  auto t = create_test_vm();
+  auto *driver = t.driver();
+  ASSERT_NE(driver, nullptr);
+  ASSERT_GE(driver->open(), 0);
+  auto *cpu = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(cpu, MAP_FAILED);
+  *static_cast<uint32_t *>(cpu) = 17;
+  kfd_ioctl_alloc_memory_of_gpu_args alloc{};
+  alloc.va_addr = 0x123400000000ULL;
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(cpu);
+  alloc.size = 4096;
+  alloc.gpu_id = driver->gpu_id();
+  alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
+  ASSERT_EQ(driver->ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &alloc), 0);
+  const auto access = t.soc()->gpu_vm().snapshot_vmid(driver->local_process_id());
+  ASSERT_TRUE(access);
+  uint32_t value = 0;
+  EXPECT_EQ(access->read(alloc.va_addr, std::as_writable_bytes(std::span(&value, 1))),
+            rocjitsu::amdgpu::VmAccessOutcome::Complete);
+  EXPECT_EQ(value, 17);
+  const uint32_t replacement = 29;
+  EXPECT_EQ(access->write(alloc.va_addr, std::as_bytes(std::span(&replacement, 1))),
+            rocjitsu::amdgpu::VmAccessOutcome::Complete);
+  EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
+  EXPECT_EQ(driver->close(), 0);
+  // Registration does not transfer ownership of the application's storage.
+  EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
+  EXPECT_EQ(::munmap(cpu, 4096), 0);
+}
+
 TEST_F(SimulatedKfdTest, CreateDefault) {
   auto t = create_test_vm();
   ASSERT_NE(t.driver(), nullptr);
@@ -119,6 +154,38 @@ TEST_F(SimulatedKfdTest, OpenAndClose) {
 
   int ret = t.driver()->close();
   EXPECT_EQ(ret, 0);
+}
+
+TEST_F(SimulatedKfdTest, DeviceProcessMappingIsolationRemapAndTeardown) {
+  auto t = create_test_vm();
+  auto *vm = dynamic_cast<rocjitsu::VirtualMachine *>(t.engine->topology().root());
+  ASSERT_NE(vm, nullptr);
+  rocjitsu::kmd::SimdojoDeviceBackend backend(*vm->soc(0), 0);
+  rocjitsu::KfdProcess first(101, 1);
+  rocjitsu::KfdProcess second(102, 1);
+  alignas(4096) std::array<uint64_t, 512> first_page{};
+  alignas(4096) std::array<uint64_t, 512> second_page{};
+  constexpr uint64_t address = 0x100000000;
+  first_page[0] = 17;
+  second_page[0] = 29;
+  first.map_pages(address, first_page.data(), sizeof(first_page), rocjitsu::amdgpu::Mtype::UC);
+  second.map_pages(address, second_page.data(), sizeof(second_page), rocjitsu::amdgpu::Mtype::UC);
+  ASSERT_EQ(backend.register_process(first, false), 0);
+  ASSERT_EQ(backend.register_process(second, false), 0);
+  EXPECT_EQ(backend.read64(first.process_id(), address), 17);
+  EXPECT_EQ(backend.read64(second.process_id(), address), 29);
+  backend.write64(first.process_id(), address, 43);
+  EXPECT_EQ(first_page[0], 43);
+  EXPECT_EQ(second_page[0], 29);
+
+  first.unmap_pages(address, sizeof(first_page));
+  first.map_pages(address, second_page.data(), sizeof(second_page), rocjitsu::amdgpu::Mtype::UC);
+  EXPECT_EQ(backend.read64(first.process_id(), address), 29);
+  backend.unregister_process(first.process_id());
+  EXPECT_THROW(backend.read64(first.process_id(), address), std::system_error);
+  EXPECT_EQ(backend.read64(second.process_id(), address), 29);
+  backend.unregister_process(second.process_id());
+  EXPECT_THROW(backend.read64(second.process_id(), address), std::system_error);
 }
 
 TEST_F(SimulatedKfdTest, DoorbellClientRemapKeepsDriverAliasStableWhenOffsetRecycles) {
@@ -265,6 +332,7 @@ TEST_F(SimulatedKfdTest, FixedAllocationMmapWaitsForInFlightHostAccesses) {
 
   kfd_ioctl_alloc_memory_of_gpu_args alloc{};
   alloc.va_addr = reinterpret_cast<uint64_t>(target);
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(target);
   alloc.size = page_size;
   alloc.gpu_id = driver->gpu_id();
   alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
@@ -313,6 +381,7 @@ TEST_F(SimulatedKfdTest, AllocationMunmapWaitsForInFlightHostAccesses) {
 
   kfd_ioctl_alloc_memory_of_gpu_args alloc{};
   alloc.va_addr = reinterpret_cast<uint64_t>(target);
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(target);
   alloc.size = page_size;
   alloc.gpu_id = driver->gpu_id();
   alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
