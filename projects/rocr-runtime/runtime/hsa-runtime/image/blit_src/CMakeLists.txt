@@ -55,6 +55,20 @@ if (NOT DEFINED TARGET_DEVICES)
 endif()
 set( TARGET_DEVICES ${TARGET_DEVICES} CACHE STRING "Build targets" FORCE )
 
+# Keep consumers' declarations and dispatch aligned with the blobs we build.
+# A configured subset must not retain references to excluded code objects.
+set(_image_blit_targets "// Generated from TARGET_DEVICES; do not edit.\n")
+foreach(dev IN LISTS TARGET_DEVICES)
+  if(NOT dev MATCHES "^gfx[0-9a-f]+$")
+    message(FATAL_ERROR "Invalid image-blit target: ${dev}")
+  endif()
+  string(APPEND _image_blit_targets "ROCR_IMAGE_BLIT_TARGET(${dev})\n")
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/image_blit_targets.inc"
+  CONTENT "${_image_blit_targets}")
+target_include_directories(${CORE_RUNTIME_TARGET} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+
 if(${CMAKE_VERBOSE_MAKEFILE})
   get_property(clang_path TARGET clang PROPERTY LOCATION)
   message("Using clang from: ${clang_path}")
