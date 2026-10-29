@@ -3622,7 +3622,12 @@ TEST(GpuMemoryTest, RegisteredVmidPassthroughMissRespectsUserSpaceLimit) {
   rocjitsu::test::LegacyGpuMemoryFixture memory("memory");
   memory.set_passthrough(true);
   constexpr uint32_t kPid = 7;
+  // The limit is architecture-specific; see legacy_address_space.h.
+#if defined(__aarch64__)
+  constexpr uint64_t kUserSpaceLimit = 1ULL << 48;
+#else
   constexpr uint64_t kUserSpaceLimit = 0x800000000000ULL;
+#endif
 
   KfdProcess process(kPid);
   memory.register_process(kPid, &process.page_table_, &process.page_table_mutex_,
@@ -3641,7 +3646,12 @@ TEST(GpuMemoryTest, RegisteredVmidPassthroughMissRespectsUserSpaceLimit) {
 TEST(GpuMemoryTest, UnregisteredVmidPassthroughRespectsUserSpaceLimit) {
   rocjitsu::test::LegacyGpuMemoryFixture memory("memory");
   memory.set_passthrough(true);
+  // The limit is architecture-specific; see legacy_address_space.h.
+#if defined(__aarch64__)
+  constexpr uint64_t kUserSpaceLimit = 1ULL << 48;
+#else
   constexpr uint64_t kUserSpaceLimit = 0x800000000000ULL;
+#endif
 
   EXPECT_EQ(memory.resolve_host_ptr(kUserSpaceLimit), nullptr);
   EXPECT_EQ(memory.resolve_host_ptr(kUserSpaceLimit + 0x123), nullptr);
