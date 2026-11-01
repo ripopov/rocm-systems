@@ -251,6 +251,13 @@ typedef int32_t (*rj_kmd_read64_fn)(void *context, const rj_kmd_read64_t *read, 
 /// for already reclaimed allocations must succeed without double release.
 typedef void (*rj_kmd_shutdown_fn)(void *context);
 
+/// Owner-thread probe before process teardown releases any queue/event/backing
+/// state: return 0 while submitted device work remains, or 1 when quiescent.
+/// Must not block, throw or re-enter the server. The context is borrowed until
+/// server destruction. The owner must continue simulation and descriptor
+/// processing while a teardown waits; device callbacks themselves never wait.
+typedef int32_t (*rj_kmd_quiescence_fn)(void *context, uint32_t process_id);
+
 typedef struct rj_kmd_backend_ops {
   uint32_t abi_version;
   uint32_t struct_size;
@@ -314,6 +321,9 @@ RJ_KMD_API int32_t rj_kmd_server_poll_fds(const rj_kmd_server_t *server, rj_kmd_
 RJ_KMD_API int32_t rj_kmd_server_process_fd(rj_kmd_server_t *server, int32_t fd, int16_t revents,
                                             char *error, size_t error_size);
 RJ_KMD_API int32_t rj_kmd_server_notification_fd(const rj_kmd_server_t *server);
+/// Optional, additive ABI-v2 teardown readiness hook; NULL restores legacy teardown.
+RJ_KMD_API int32_t rj_kmd_server_set_quiescence_probe(rj_kmd_server_t *server,
+                                                      rj_kmd_quiescence_fn probe, void *context);
 RJ_KMD_API int32_t rj_kmd_server_drain_doorbells(rj_kmd_server_t *server,
                                                  rj_kmd_doorbell_record_t *records, size_t *count);
 RJ_KMD_API int32_t rj_kmd_server_post_interrupt(rj_kmd_server_t *server, uint32_t process_id,

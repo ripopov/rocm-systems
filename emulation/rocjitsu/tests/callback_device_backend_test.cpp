@@ -161,5 +161,60 @@ TEST(CallbackDeviceBackendTest, FailedQueueTeardownQuiescesDeviceAndLatchesTermi
   EXPECT_EQ(host.shutdowns, 1);
 }
 
+TEST(CallbackDeviceBackendTest, ProcessCloseRetainsQueuesUntilQuiescence) {
+  CallbackHost host;
+  CallbackDispatcher dispatcher;
+  bool ready = false;
+  unsigned probes = 0;
+  std::promise<void> parked;
+  auto waiting = parked.get_future();
+  auto backend = std::make_unique<kmd::CallbackDeviceBackend>(ROCJITSU_CODE_ARCH_CDNA4, 7,
+                                                              host.operations(), dispatcher);
+  auto *device = backend.get();
+  struct Probe {
+    CallbackHost &host;
+    bool &ready;
+    unsigned &calls;
+    std::promise<void> &parked;
+  } probe{host, ready, probes, parked};
+  device->set_quiescence_probe(
+      [](void *context, uint32_t) -> int32_t {
+        auto &state = *static_cast<Probe *>(context);
+        EXPECT_EQ(std::this_thread::get_id(), state.host.owner);
+        if (++state.calls == 1)
+          state.parked.set_value();
+        if (!state.ready) {
+          EXPECT_EQ(state.host.destroys, 0);
+          EXPECT_EQ(state.host.closes, 0);
+        }
+        return state.ready;
+      },
+      &probe);
+  std::vector<SimulatedKfd::BackendDevice> devices;
+  devices.push_back({7, std::move(backend)});
+  SimulatedKfd driver(std::move(devices));
+  dispatcher.run_while_dispatching([&] {
+    const auto pid = driver.open_process();
+    ASSERT_NE(pid, 0);
+    kfd_ioctl_create_queue_args queue{};
+    queue.gpu_id = 7;
+    queue.queue_percentage = 100;
+    queue.queue_type = KFD_IOC_QUEUE_TYPE_COMPUTE_AQL;
+    ASSERT_EQ(driver.ioctl(pid, AMDKFD_IOC_CREATE_QUEUE, &queue), 0);
+    auto closing = std::async(std::launch::async, [&] { return driver.close(pid); });
+    waiting.wait();
+    // An ordinary owner callback can still run while teardown is deferred.
+    dispatcher.invoke([&] {
+      EXPECT_EQ(host.destroys, 0);
+      EXPECT_EQ(host.closes, 0);
+      ready = true;
+    });
+    EXPECT_EQ(closing.get(), 0);
+  });
+  EXPECT_GT(probes, 0u);
+  EXPECT_EQ(host.destroys, 1);
+  EXPECT_EQ(host.closes, 1);
+}
+
 } // namespace
 } // namespace rocjitsu

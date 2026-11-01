@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <poll.h>
@@ -20,7 +21,6 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace rocjitsu {
 
@@ -51,7 +51,27 @@ public:
     auto result = task->get_future();
     {
       std::lock_guard lock(mutex_);
-      callbacks_.emplace_back([task] { (*task)(); });
+      callbacks_.push_back({{}, [task] { (*task)(); }});
+      notify();
+    }
+    return result.get();
+  }
+
+  /// Wait on a worker until an owner-thread, nonthrowing readiness probe passes.
+  /// Deferred tasks retain their promises and never block the dispatching owner.
+  template <typename Ready, typename Function>
+  auto invoke_when(Ready &&ready, Function &&function) -> std::invoke_result_t<Function> {
+    if (std::this_thread::get_id() == owner_) {
+      if (!std::invoke(ready))
+        throw std::logic_error("owner cannot wait for its own callback readiness");
+      return std::invoke(std::forward<Function>(function));
+    }
+    using Result = std::invoke_result_t<Function>;
+    auto task = std::make_shared<std::packaged_task<Result()>>(std::forward<Function>(function));
+    auto result = task->get_future();
+    {
+      std::lock_guard lock(mutex_);
+      callbacks_.push_back({std::forward<Ready>(ready), [task] { (*task)(); }});
       notify();
     }
     return result.get();
@@ -61,9 +81,9 @@ public:
   /// submitted during a callback keep the fd readable for the next dispatch.
   void dispatch() {
     require_owner();
-    // Empty vector construction and swap allocate nothing: teardown pumping
-    // must remain possible when a producer is unwinding allocation failure.
-    std::vector<std::function<void()>> batch;
+    // Splicing both the batch and deferred tasks allocates nothing: teardown
+    // pumping must remain possible while a producer unwinds allocation failure.
+    std::list<PendingCallback> batch;
     {
       std::lock_guard lock(mutex_);
       uint64_t value;
@@ -74,10 +94,19 @@ public:
           std::terminate(); // Owned eventfd was closed/corrupted by the host.
         break;
       }
-      batch.swap(callbacks_);
+      batch.splice(batch.end(), callbacks_);
     }
-    for (auto &callback : batch)
-      callback(); // packaged_task delivers exceptions to the calling worker.
+    while (!batch.empty()) {
+      auto callback = batch.begin();
+      if (callback->ready && !callback->ready()) {
+        std::lock_guard lock(mutex_);
+        callbacks_.splice(callbacks_.end(), batch, callback);
+        notify(); // Keep deferred work pollable for the owner's next pass.
+      } else {
+        callback->run(); // packaged_task returns exceptions to the worker.
+        batch.erase(callback);
+      }
+    }
   }
 
   /// Run a blocking transport stop/join away from the owner while continuing
@@ -109,6 +138,11 @@ public:
   }
 
 private:
+  struct PendingCallback {
+    std::function<bool()> ready;
+    std::function<void()> run;
+  };
+
   void require_owner() const {
     if (std::this_thread::get_id() != owner_)
       throw std::logic_error("embedded KMD callbacks require their owner thread");
@@ -128,7 +162,7 @@ private:
   const std::thread::id owner_ = std::this_thread::get_id();
   util::UniqueHandle notification_;
   std::mutex mutex_;
-  std::vector<std::function<void()>> callbacks_;
+  std::list<PendingCallback> callbacks_;
 };
 
 } // namespace rocjitsu

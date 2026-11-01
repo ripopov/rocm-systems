@@ -130,6 +130,10 @@ public:
   /// A negative errno leaves no device-side process state. Passthrough is only
   /// valid when the application and device execute in the same host process.
   virtual int register_process(KfdProcess &process, bool passthrough) = 0;
+  /// Optional barrier before KFD dismantles any process, queue or event state.
+  /// External asynchronous devices can finish submitted work here; backends
+  /// which stop execution as part of queue removal need no additional step.
+  virtual void prepare_process_teardown(uint32_t process) { (void)process; }
   /// Stop all process accesses and remove remaining device mappings before
   /// returning. Allocation leases can survive this process through KFD IPC.
   virtual void unregister_process(uint32_t process) = 0;

@@ -1776,6 +1776,13 @@ int SimulatedKfd::close(uint32_t process_id) {
   for (auto &[pid, proc_ref] : released)
     release_debuggee_state(pid, proc_ref.get());
 
+  // Preserve queues, event routing and allocation leases until an external
+  // asynchronous device has finished submitted work. No allocation/event lock
+  // is held here, so the owner can keep delivering hardware completions.
+  for (auto &gpu : gpus_)
+    if (gpu.backend)
+      gpu.backend->prepare_process_teardown(process_id);
+
   // Set the closing flag first, under op_mutex_, so the dispatch_ioctl guard sees
   // it before any state is dismantled.
   proc.event_state_.notify_closing();

@@ -24,6 +24,7 @@ public:
   void configure(const DeviceApertures &, uint32_t, const DeviceCallbacks &) override;
   void set_memory_fault_reporter(MemoryFaultReporter *reporter) override { reporter_ = reporter; }
   int register_process(KfdProcess &, bool passthrough) override;
+  void prepare_process_teardown(uint32_t process) override;
   void unregister_process(uint32_t process) override;
   void set_process_client_pid(uint32_t process, int32_t pid) override;
   void set_process_mem_fd(uint32_t, int fd) override;
@@ -41,8 +42,14 @@ public:
   DoorbellMonitor &doorbells() { return doorbells_; }
   void post_interrupt(uint32_t process, uint32_t event);
   void post_memory_fault(uint32_t process, uint64_t address, MemoryFaultCause cause);
+  void set_quiescence_probe(rj_kmd_quiescence_fn probe, void *context) {
+    quiescence_probe_ = probe;
+    quiescence_context_ = context;
+  }
 
 private:
+  rj_kmd_quiescence_fn quiescence_probe_ = nullptr;
+  void *quiescence_context_ = nullptr;
   template <typename T> static T record() {
     T value{};
     value.abi_version = RJ_KMD_SERVER_ABI_VERSION;

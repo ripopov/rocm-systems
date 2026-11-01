@@ -86,6 +86,14 @@ void CallbackDeviceBackend::shutdown() {
   active_processes_.store(0);
 }
 
+void CallbackDeviceBackend::prepare_process_teardown(uint32_t process) {
+  dispatcher_.invoke_when(
+      [this, process] {
+        return !quiescence_probe_ || quiescence_probe_(quiescence_context_, process) != 0;
+      },
+      [] {});
+}
+
 void CallbackDeviceBackend::teardown_result(int result) {
   if (result) {
     memory_.fail(result);

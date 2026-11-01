@@ -274,6 +274,16 @@ int32_t rj_kmd_server_notification_fd(const rj_kmd_server_t *server) {
   return server->backend->doorbells().fd();
 }
 
+int32_t rj_kmd_server_set_quiescence_probe(rj_kmd_server_t *server, rj_kmd_quiescence_fn probe,
+                                           void *context) {
+  return guard(server, nullptr, 0, [&] {
+    if (!server)
+      return -EINVAL;
+    server->backend->set_quiescence_probe(probe, context);
+    return 0;
+  });
+}
+
 int32_t rj_kmd_server_drain_doorbells(rj_kmd_server_t *server, rj_kmd_doorbell_record_t *records,
                                       size_t *count) {
   return guard(server, nullptr, 0, [&] {

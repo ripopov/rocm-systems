@@ -155,6 +155,7 @@ TEST_P(KmdEmbeddingTest, RejectsWrongThreadAndInvalidDescriptors) {
   auto wrong_thread = std::async(std::launch::async, [&] {
     size_t count = 0;
     EXPECT_EQ(rj_kmd_server_poll_fds(server, nullptr, &count), -EPERM);
+    EXPECT_EQ(rj_kmd_server_set_quiescence_probe(server, nullptr, nullptr), -EPERM);
   });
   wrong_thread.get();
   char error[32]{};
@@ -166,6 +167,8 @@ TEST_P(KmdEmbeddingTest, RejectsWrongThreadAndInvalidDescriptors) {
   size_t count = 0;
   EXPECT_EQ(rj_kmd_server_poll_fds(server, nullptr, &count), 0);
   EXPECT_EQ(count, 1u);
+  EXPECT_EQ(rj_kmd_server_set_quiescence_probe(nullptr, nullptr, nullptr), -EINVAL);
+  EXPECT_EQ(rj_kmd_server_set_quiescence_probe(server, nullptr, nullptr), 0);
 }
 
 INSTANTIATE_TEST_SUITE_P(Topology, KmdEmbeddingTest, testing::Values(1u, 8u));

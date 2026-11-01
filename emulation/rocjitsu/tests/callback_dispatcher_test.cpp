@@ -42,6 +42,40 @@ TEST(CallbackDispatcherTest, CallbackExceptionsReturnToWorker) {
   });
 }
 
+TEST(CallbackDispatcherTest, DeferredReadinessKeepsOwnerAndOtherCallbacksRunning) {
+  CallbackDispatcher dispatcher;
+  const auto owner = std::this_thread::get_id();
+  bool ready = false;
+  unsigned calls = 0;
+  auto deferred = std::async(std::launch::async, [&] {
+    return dispatcher.invoke_when(
+        [&] {
+          EXPECT_EQ(std::this_thread::get_id(), owner);
+          return ready;
+        },
+        [&] {
+          ++calls;
+          return 42;
+        });
+  });
+  pollfd descriptor{dispatcher.fd(), POLLIN, 0};
+  ASSERT_EQ(::poll(&descriptor, 1, 5000), 1);
+  dispatcher.dispatch();
+  EXPECT_EQ(calls, 0u);
+  EXPECT_EQ(deferred.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+  EXPECT_EQ(::poll(&descriptor, 1, 0), 1);
+  dispatcher.run_while_dispatching([&] {
+    dispatcher.invoke([&] { ready = true; });
+    EXPECT_EQ(deferred.get(), 42);
+  });
+  EXPECT_EQ(calls, 1u);
+}
+
+TEST(CallbackDispatcherTest, OwnerCannotBlockOnItsOwnReadiness) {
+  CallbackDispatcher dispatcher;
+  EXPECT_THROW(dispatcher.invoke_when([] { return false; }, [] {}), std::logic_error);
+}
+
 TEST(CallbackDispatcherTest, ShutdownPumpsCallbacksFromAllWorkersBeforeJoining) {
   CallbackDispatcher dispatcher;
   const auto owner = std::this_thread::get_id();
