@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <limits>
+#include <link.h>
 #include <mutex>
 #include <new>
 #include <poll.h>
@@ -606,9 +607,16 @@ int request_backing(int socket, size_t size, int mode, int sized_file = -1,
 
 std::string keeper_path() {
   Dl_info info{};
-  if (dladdr(reinterpret_cast<void *>(&create_memory_backing), &info) && info.dli_fname) {
+  link_map *object = nullptr;
+  if (dladdr1(reinterpret_cast<void *>(&create_memory_backing), &info,
+              reinterpret_cast<void **>(&object), RTLD_DL_LINKMAP) &&
+      info.dli_fname && object) {
+    // For the main executable dladdr reports argv[0], which may be a bare PATH
+    // name or stale after chdir. Only its empty link-map name identifies this
+    // case; shared libraries must keep resolving relative to their own object.
+    const char *object_path = *object->l_name ? info.dli_fname : "/proc/self/exe";
     std::error_code error;
-    const auto library = std::filesystem::canonical(info.dli_fname, error);
+    const auto library = std::filesystem::canonical(object_path, error);
     if (!error) {
       // The same object is linked into the interposer, CLI, and unit tests.
       // Resolve each supported installed layout relative to that object.
@@ -1190,14 +1198,31 @@ int reopen_memory_backing(int fd, int access_mode) {
   return host_call(libc_passthrough().openat, ::openat, AT_FDCWD, path, access_mode, 0);
 }
 
-int check_memory_backing_size(int fd, size_t size) {
-  struct stat info {};
-  if (stat_memory_backing(fd, &info) != 0)
+std::optional<MemoryBackingRange> memory_backing_subrange(const MemoryBackingRange &range,
+                                                          uint64_t offset, uint64_t size) {
+  constexpr uint64_t max_offset = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+  if (range.offset > max_offset || range.size > max_offset - range.offset || offset > range.size ||
+      size > range.size - offset)
+    return std::nullopt;
+  return MemoryBackingRange{range.fd, range.offset + offset, size};
+}
+
+int check_memory_backing_range(const MemoryBackingRange &range) {
+  if (!memory_backing_subrange(range, 0, range.size)) {
+    errno = EINVAL;
     return -1;
-  if (info.st_size >= 0 && size <= static_cast<uint64_t>(info.st_size))
+  }
+  struct stat info {};
+  if (stat_memory_backing(range.fd, &info) != 0)
+    return -1;
+  if (info.st_size >= 0 && range.offset + range.size <= static_cast<uint64_t>(info.st_size))
     return 0;
   errno = EINVAL;
   return -1;
+}
+
+int check_memory_backing_size(int fd, size_t size) {
+  return check_memory_backing_range({fd, 0, size});
 }
 
 void *map_memory_backing(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {

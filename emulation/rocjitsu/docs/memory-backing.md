@@ -94,9 +94,11 @@ public `rj_vm_map_shared_mem` C API. These handles are borrowed from the VM;
 they may be memfds or opaque tokens, and ordinary libc `mmap` cannot map tokens.
 The same API accepts descriptors duplicated or received through `SCM_RIGHTS`.
 Keep the library loaded and the descriptor valid during the call.
-Callers retain the allocation size separately and send it alongside the
-descriptor when transferring ownership or access with `SCM_RIGHTS`. Use that
-size to select the view's offset and length. Non-preloaded host `fstat` sees a
+Callers receiving only a handle retain the allocation's offset and length
+separately. Command and per-process map replies also provide `shared_offset` and
+`shared_size`; preserve those bounds alongside the descriptor when transferring
+access with `SCM_RIGHTS`. A device backing can contain several allocations, so
+its full size is not the permitted slice. Non-preloaded host `fstat` sees a
 socket with size zero for a token, and host `lseek` cannot query its backing
 size; host file metadata is not a portable size source for these handles.
 
@@ -114,6 +116,18 @@ The keeper-lifetime, IPC-namespace, and credential constraints above also apply.
 The caller owns the resulting view and releases it with host `munmap`.
 Mapped views outlive handles, but the caller must stop simulator access before
 unmapping or changing their protections.
+
+## Internal backing ranges
+
+`MemoryBackingRange` borrows `{fd, offset, size}` without closing the descriptor
+or retaining storage. Checks cover `off_t` representability, overflow, backing
+bounds and permitted subranges through the native-file/token adapters. Mapping
+alignment and access policy remain with the operation. C and RPC records are
+converted explicitly at their interfaces.
+
+Allocation leases retain storage across IPC imports and exporter exit; mapping
+failures retain the lease until unmap or quiescent teardown. The client owns cached
+descriptors and closes temporary reply aliases. Borrowed ranges add no owner.
 
 ## Keeper lifecycle
 

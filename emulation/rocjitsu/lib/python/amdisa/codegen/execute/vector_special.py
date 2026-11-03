@@ -2842,7 +2842,7 @@ def _gen_widen_scalef32(ctx, mode: str, dst_fmt: str, src_fmt: str) -> str:
     _scale_preamble(L, scale_src)
 
     if mode == 'single':
-        # Single widening: src0 = narrow value (byte selected by OPSEL[1:0])
+        # OPSEL[0] selects the source halfword; OPSEL[1] selects its byte.
         if dst_fmt in ('f16', 'bf16'):
             conv = (
                 'util::f32_to_f16_mode'
@@ -2870,7 +2870,9 @@ def _gen_widen_scalef32(ctx, mode: str, dst_fmt: str, src_fmt: str) -> str:
         L.append(
             f'    uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane({src[0]}, lane);'
         )
-        L.append('    uint32_t src_byte = inst_.op_sel & 0x3;')
+        L.append(
+            '    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);'
+        )
         if src_fmt == 'fp4':
             L.append(
                 '    uint8_t narrow_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xF);'
@@ -2911,7 +2913,9 @@ def _gen_widen_scalef32(ctx, mode: str, dst_fmt: str, src_fmt: str) -> str:
             L.append(
                 f'    uint32_t src_raw = amdgpu::RegisterAccess(wf).read_lane({src[0]}, lane);'
             )
-            L.append('    uint32_t src_byte = inst_.op_sel & 0x3;')
+            L.append(
+                '    uint32_t src_byte = ((inst_.op_sel & 1u) << 1) | ((inst_.op_sel >> 1) & 1u);'
+            )
             L.append(
                 '    uint8_t byte_val = static_cast<uint8_t>((src_raw >> (src_byte * 8)) & 0xFF);'
             )

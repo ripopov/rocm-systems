@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <linux/mman.h>
 #include <optional>
 #include <string_view>
@@ -222,6 +223,24 @@ PtracerGrantVerdict authorize_daemon_address_space_access(int socket) {
 /// @brief Map driver backing without re-entering the interposer.
 void *safe_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
   return map_memory_backing(addr, length, prot, flags, fd, offset);
+}
+
+// Restore caller-owned storage before its device-backed registration is
+// released. Keep the original mapping intact if preparing the copy fails.
+int detach_userptr(uint64_t address, uint64_t size) {
+  if (!address)
+    return 0;
+  auto *original = reinterpret_cast<void *>(address);
+  auto *copy = safe_mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (copy == MAP_FAILED)
+    return -errno;
+  std::memcpy(copy, original, size);
+  if (syscall(SYS_mremap, copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, original) == -1) {
+    const int error = errno;
+    syscall(SYS_munmap, copy, size);
+    return -error;
+  }
+  return 0;
 }
 
 Sysfs::GpuInfo gpu_info_from_rpc(const RpcGpuInfo &src) {
@@ -446,7 +465,12 @@ RemoteDriver::BackingLookup RemoteDriver::find_backing_for_addr(void *addr, size
       // caller's backing lookup/mmap, operating on a closed/reused fd. The
       // dup is taken under rpc_mutex_, the same lock close() holds, so the stored
       // fd is guaranteed still open here. The caller MUST close the returned fd.
-      int dup_fd = static_cast<int>(syscall(SYS_fcntl, r.backing_fd, F_DUPFD_CLOEXEC, 0));
+      const auto slice = memory_backing_subrange(r.backing, target - r.va, length);
+      if (!slice) {
+        errno = EINVAL;
+        return BackingLookup::kDupFailed;
+      }
+      int dup_fd = static_cast<int>(syscall(SYS_fcntl, slice->fd, F_DUPFD_CLOEXEC, 0));
       if (dup_fd < 0) {
         // The range matched but we could not hand out a descriptor. Report this
         // distinctly so the caller fails the mmap rather than silently falling
@@ -458,7 +482,7 @@ RemoteDriver::BackingLookup RemoteDriver::find_backing_for_addr(void *addr, size
         return BackingLookup::kDupFailed;
       }
       *backing_out = dup_fd;
-      *offset_out = static_cast<off_t>(target - r.va);
+      *offset_out = static_cast<off_t>(slice->offset);
       return BackingLookup::kFound;
     }
   }
@@ -471,13 +495,11 @@ RemoteDriver::RemoteDriver(int sock_fd, std::function<void()> on_disconnect)
 }
 
 RemoteDriver::~RemoteDriver() {
-  request_close();
-  if (disconnect_monitor_.joinable())
-    disconnect_monitor_.join();
-  for (auto &[handle, fd] : handle_backings_) {
-    if (fd >= 0)
-      syscall(SYS_close, fd);
-  }
+  // Destruction must honor the same caller-memory lifetime as explicit close.
+  // Releasing the connection after a failed detach could expose reused device
+  // storage through an application pointer; a destructor cannot report that.
+  if (close() != 0)
+    std::terminate();
   if (kfd_marker_ != nullptr)
     syscall(SYS_munmap, kfd_marker_, kfd_marker_size_);
   if (sock_ >= 0)
@@ -705,6 +727,15 @@ int RemoteDriver::close() {
     std::lock_guard<std::mutex> lock(rpc_mutex_);
     if (disconnect_monitor_.joinable())
       disconnect_monitor_.join();
+    for (auto &[handle, backing] : handle_backings_) {
+      const int result = detach_userptr(backing.userptr_address, backing.userptr_size);
+      if (result != 0) {
+        protocol_failed_.store(true);
+        return result;
+      }
+      backing.userptr_address = 0;
+      backing.userptr_size = 0;
+    }
     if (sock_ >= 0) {
       RpcHeader hdr{};
       hdr.opcode = RPC_CLOSE;
@@ -717,9 +748,9 @@ int RemoteDriver::close() {
       sock_ = -1;
     }
 
-    for (auto &[handle, fd] : handle_backings_) {
-      if (fd >= 0)
-        syscall(SYS_close, fd);
+    for (auto &[handle, backing] : handle_backings_) {
+      if (backing.range.fd >= 0)
+        syscall(SYS_close, backing.range.fd);
     }
     handle_backings_.clear();
     alloc_ranges_.clear();
@@ -814,6 +845,41 @@ int RemoteDriver::ioctl(unsigned long request, void *arg) {
 
 int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   std::lock_guard<std::mutex> lock(rpc_mutex_);
+  if (request != AMDKFD_IOC_FREE_MEMORY_OF_GPU || protocol_failed_.load())
+    return send_ioctl_locked(request, arg);
+
+  const auto handle = static_cast<kfd_ioctl_free_memory_of_gpu_args *>(arg)->handle;
+  const auto allocation = handle_backings_.find(handle);
+  if (allocation == handle_backings_.end() || !allocation->second.userptr_address)
+    return send_ioctl_locked(request, arg);
+
+  // The caller owns USERPTR memory beyond deregistration. Detach it before
+  // FREE allows a device allocator to reuse the shared backing.
+  const auto backing = allocation->second;
+  auto *address = reinterpret_cast<void *>(backing.userptr_address);
+  const int detached = detach_userptr(backing.userptr_address, backing.userptr_size);
+  if (detached != 0)
+    return detached;
+  allocation->second.userptr_address = 0;
+  allocation->second.userptr_size = 0;
+
+  const int result = send_ioctl_locked(request, arg);
+  // A rejected FREE still owns device storage and must remain shared for a
+  // retry. A poisoned connection cannot be reused; retain the private snapshot
+  // instead of reconnecting the application to possibly reclaimed storage.
+  if (result != 0 && !protocol_failed_.load()) {
+    if (safe_mmap(address, backing.userptr_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                  backing.range.fd, static_cast<off_t>(backing.range.offset)) == MAP_FAILED) {
+      protocol_failed_.store(true);
+      return -EPROTO;
+    }
+    allocation->second.userptr_address = backing.userptr_address;
+    allocation->second.userptr_size = backing.userptr_size;
+  }
+  return result;
+}
+
+int RemoteDriver::send_ioctl_locked(unsigned long request, void *arg) {
   // The stream is misaligned past a rejected reply; every later header would be
   // parsed out of stale bytes. Fail closed instead of returning bogus results.
   // Tested under rpc_mutex_, not before it: a thread that read the flag first
@@ -826,16 +892,15 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   if (!validate_ioctl_arg_size(request, arg, arg_size))
     return -EINVAL;
 
-  // The daemon rewrites mmap_offset to the allocation handle in its reply.
-  // Preserve the caller's USERPTR CPU address for the client-side promotion.
-  uint64_t userptr_cpu_address = 0;
+  // USERPTR's input mmap_offset is the CPU address, not the GPU VA. The
+  // response replaces it with an mmap token, so retain it before the RPC.
+  uint64_t userptr_address = 0;
   if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU) {
-    const auto *alloc = static_cast<const kfd_ioctl_alloc_memory_of_gpu_args *>(arg);
-    if (alloc->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) {
-      userptr_cpu_address = alloc->mmap_offset;
-      if (userptr_cpu_address == 0)
-        return -EINVAL;
-    }
+    const auto *allocation = static_cast<const kfd_ioctl_alloc_memory_of_gpu_args *>(arg);
+    if (allocation->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR)
+      userptr_address = allocation->mmap_offset;
+    if ((allocation->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) && userptr_address == 0)
+      return -EINVAL;
   }
 
   // Save original embedded pointers before serialization. The daemon rewrites
@@ -900,7 +965,7 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
         // untouched -- kfd_dbg_trap_device_snapshot(), reproduced by
         // SimulatedKfd::debug_device_snapshot), but the daemon cannot: it
         // rewrites snapshot_buf_ptr to its own inline tail before replaying the
-        // ioctl (rj_vm.cpp, reconstruct_embedded_pointers), so the driver never
+        // ioctl (kmd_command.cpp, reconstruct_embedded_pointers), so the driver never
         // sees the null and answers a malformed request with success and a
         // device total. Failing client-side is what keeps the two transports
         // returning the same verdict.
@@ -1183,6 +1248,22 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   if (resp->payload_bytes > kMaxPayloadBytes)
     return poison_reply();
 
+  RpcSharedBacking shared_backing{};
+  if (num_fds > 0) {
+    if (resp->result != 0 || resp->payload_bytes < sizeof(shared_backing) ||
+        !rpc_recv_exact(sock_, &shared_backing, sizeof(shared_backing)) ||
+        (shared_backing.size == 0 ||
+         check_memory_backing_range(
+             {received_fds[0], shared_backing.offset, shared_backing.size}) != 0))
+      return poison_reply();
+    resp->payload_bytes -= sizeof(shared_backing);
+    if (resp->payload_bytes < arg_size)
+      return poison_reply();
+    if (request != AMDKFD_IOC_ALLOC_MEMORY_OF_GPU && request != AMDKFD_IOC_IPC_IMPORT_HANDLE &&
+        request != AMDKFD_IOC_EXPORT_DMABUF)
+      return poison_reply();
+  }
+
   if (resp->payload_bytes > 0) {
     std::vector<uint8_t> payload(resp->payload_bytes);
     // A partial read consumes part of the declared payload and abandons the
@@ -1389,13 +1470,15 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
     }
   }
 
-  auto register_allocation = [&](uint64_t handle, uint64_t va_addr, uint64_t size, int backing_fd) {
-    handle_backings_[handle] = backing_fd;
+  const MemoryBackingRange shared_range{num_fds > 0 ? received_fds[0] : -1, shared_backing.offset,
+                                        shared_backing.size};
+  auto register_allocation = [&](uint64_t handle, uint64_t va_addr, uint64_t size) {
+    handle_backings_[handle] = {shared_range};
     if (va_addr != 0 && size > 0)
-      alloc_ranges_.push_back({va_addr, size, backing_fd});
+      alloc_ranges_.push_back({va_addr, size, shared_range});
   };
 
-  auto promote_userptr = [&](uint64_t va_addr, uint64_t size, int backing_fd) {
+  auto promote_userptr = [&](uint64_t va_addr, uint64_t size) {
     auto *va = reinterpret_cast<void *>(va_addr);
     auto length = static_cast<size_t>(size);
 
@@ -1403,27 +1486,29 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
     size_t num_pages = (length + page_size - 1) / page_size;
     std::vector<uint8_t> resident(num_pages);
     auto mc_rc = syscall(SYS_mincore, va, length, resident.data());
+    if (mc_rc != 0)
+      return false;
 
     auto *temp =
-        static_cast<uint8_t *>(safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, backing_fd, 0));
-    if (temp != MAP_FAILED) {
-      if (mc_rc == 0) {
-        auto *src = static_cast<uint8_t *>(va);
-        for (size_t i = 0; i < num_pages; ++i) {
-          if (resident[i] & 1) {
-            size_t off = i * page_size;
-            size_t n = std::min(page_size, length - off);
-            std::memcpy(temp + off, src + off, n);
-          }
-        }
+        static_cast<uint8_t *>(safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, shared_range.fd,
+                                         static_cast<off_t>(shared_range.offset)));
+    if (temp == MAP_FAILED)
+      return false;
+    auto *src = static_cast<uint8_t *>(va);
+    for (size_t i = 0; i < num_pages; ++i) {
+      if (resident[i] & 1) {
+        size_t off = i * page_size;
+        size_t n = std::min(page_size, length - off);
+        std::memcpy(temp + off, src + off, n);
       }
-      syscall(SYS_munmap, temp, length);
     }
+    syscall(SYS_munmap, temp, length);
 
-    auto *mapped =
-        safe_mmap(va, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, backing_fd, 0);
+    auto *mapped = safe_mmap(va, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                             shared_range.fd, static_cast<off_t>(shared_range.offset));
     if (mapped != MAP_FAILED)
       syscall(SYS_madvise, mapped, length, MADV_POPULATE_WRITE);
+    return mapped != MAP_FAILED;
   };
 
   // Store backing descriptor received from ALLOC_MEMORY for use in the subsequent mmap().
@@ -1431,22 +1516,30 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU && resp->result == 0) {
     auto *alloc_args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arg);
     if (num_fds > 0 && received_fds[0] >= 0) {
-      register_allocation(alloc_args->handle, alloc_args->va_addr, alloc_args->size,
-                          received_fds[0]);
-
-      if (alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR)
-        promote_userptr(userptr_cpu_address, alloc_args->size, received_fds[0]);
+      if (alloc_args->size > shared_backing.size || handle_backings_.contains(alloc_args->handle))
+        return poison_reply();
+      if ((alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) &&
+          !promote_userptr(userptr_address, alloc_args->size))
+        return poison_reply();
+      register_allocation(alloc_args->handle,
+                          (alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR)
+                              ? userptr_address
+                              : alloc_args->va_addr,
+                          alloc_args->size);
+      if (alloc_args->flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) {
+        auto &backing = handle_backings_.at(alloc_args->handle);
+        backing.userptr_address = userptr_address;
+        backing.userptr_size = alloc_args->size;
+      }
     }
   }
 
   if (request == AMDKFD_IOC_IPC_IMPORT_HANDLE && resp->result == 0) {
     auto *import_args = static_cast<kfd_ioctl_ipc_import_handle_args *>(arg);
     if (num_fds > 0 && received_fds[0] >= 0) {
-      uint64_t size = 0;
-      struct stat st {};
-      if (stat_memory_backing(received_fds[0], &st) == 0)
-        size = static_cast<uint64_t>(st.st_size);
-      register_allocation(import_args->handle, import_args->va_addr, size, received_fds[0]);
+      if (handle_backings_.contains(import_args->handle))
+        return poison_reply();
+      register_allocation(import_args->handle, import_args->va_addr, shared_range.size);
     }
   }
 
@@ -1464,9 +1557,9 @@ int RemoteDriver::send_ioctl(unsigned long request, void *arg) {
   if (request == AMDKFD_IOC_FREE_MEMORY_OF_GPU && resp->result == 0) {
     auto *free_args = static_cast<kfd_ioctl_free_memory_of_gpu_args *>(arg);
     if (auto it = handle_backings_.find(free_args->handle); it != handle_backings_.end()) {
-      int freed_backing = it->second;
+      int freed_backing = it->second.range.fd;
       std::erase_if(alloc_ranges_,
-                    [freed_backing](const AllocRange &r) { return r.backing_fd == freed_backing; });
+                    [freed_backing](const AllocRange &r) { return r.backing.fd == freed_backing; });
       syscall(SYS_close, freed_backing);
       handle_backings_.erase(it);
     }
@@ -1489,9 +1582,10 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
   }
 
   // Send the mmap RPC so the daemon creates its own mapping for GPU simulation.
-  int backing_fd = -1;
-  int rc = send_mmap(addr, length, prot, flags, offset, &backing_fd);
-  const util::BasicUniqueHandle<MmapReplyFdTraits> reply_fd{backing_fd};
+  int memfd = -1;
+  RpcSharedBacking backing{};
+  int rc = send_mmap(addr, length, prot, flags, offset, &memfd, &backing);
+  const util::BasicUniqueHandle<MmapReplyFdTraits> reply_fd{memfd};
   if (rc != 0) {
     // send_mmap() reports a negative errno, but only its transport failures
     // leave errno set as a side effect; the poison paths and the daemon's own
@@ -1514,12 +1608,17 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
   uint64_t type = static_cast<uint64_t>(offset) & (0x3ULL << 62);
   if (mapping_backing < 0 && type == 0) {
     uint64_t handle = static_cast<uint64_t>(offset) >> 12;
-    if (auto it = handle_backings_.find(handle); it != handle_backings_.end())
-      mapping_backing = it->second;
+    if (auto it = handle_backings_.find(handle); it != handle_backings_.end()) {
+      mapping_backing = it->second.range.fd;
+      backing = {it->second.range.offset, it->second.range.size};
+    }
   }
   if (mapping_backing >= 0) {
-    if (check_memory_backing_size(mapping_backing, length) != 0)
+    if (backing.size == 0 || length > backing.size ||
+        check_memory_backing_range({mapping_backing, backing.offset, backing.size}) != 0) {
+      errno = EINVAL;
       return MAP_FAILED;
+    }
 
     // Pre-copy committed pages (code objects) from the existing anonymous
     // reservation into the backing descriptor before MAP_FIXED replaces them. Uses a temp
@@ -1531,8 +1630,9 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
         size_t num_pages = (length + page_size - 1) / page_size;
         std::vector<uint8_t> page_resident(num_pages);
         auto mc_rc = syscall(SYS_mincore, addr, length, page_resident.data());
-        auto *temp = static_cast<uint8_t *>(
-            safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED, mapping_backing, 0));
+        auto *temp =
+            static_cast<uint8_t *>(safe_mmap(nullptr, length, PROT_WRITE, MAP_SHARED,
+                                             mapping_backing, static_cast<off_t>(backing.offset)));
         if (temp != MAP_FAILED) {
           if (mc_rc == 0) {
             auto *src = static_cast<uint8_t *>(addr);
@@ -1555,7 +1655,8 @@ void *RemoteDriver::mmap(void *addr, size_t length, int prot, int flags, off_t o
     int mflags = MAP_SHARED;
     if (flags & MAP_FIXED)
       mflags |= MAP_FIXED;
-    auto *mapped = safe_mmap(addr, length, PROT_READ | PROT_WRITE, mflags, mapping_backing, 0);
+    auto *mapped = safe_mmap(addr, length, PROT_READ | PROT_WRITE, mflags, mapping_backing,
+                             static_cast<off_t>(backing.offset));
     if (mapped != MAP_FAILED)
       syscall(SYS_madvise, mapped, length, MADV_POPULATE_WRITE);
     if (mapped != MAP_FAILED && rocjitsu::kmd::is_device_memory_backing(mapping_backing))
@@ -1614,10 +1715,11 @@ int RemoteDriver::munmap(void *addr, size_t length) {
 }
 
 int RemoteDriver::send_mmap(void *addr, size_t length, int prot, int flags, off_t offset,
-                            int *backing_out) {
+                            int *memfd_out, RpcSharedBacking *backing_out) {
   // rpc_mutex_ is already held by the caller (mmap()), which has also already
   // rejected a poisoned stream.
-  *backing_out = -1;
+  *memfd_out = -1;
+  *backing_out = {};
   RpcMmapRequest req = {};
   req.addr = reinterpret_cast<uint64_t>(addr);
   req.length = length;
@@ -1664,7 +1766,11 @@ int RemoteDriver::send_mmap(void *addr, size_t length, int prot, int flags, off_
     return poison_reply();
 
   auto *resp = reinterpret_cast<RpcHeader *>(response_buffer);
-  *backing_out = (num_fds > 0) ? received_fds[0] : -1;
+  if (resp->opcode != RPC_MMAP || resp->payload_bytes != sizeof(RpcMmapResponse))
+    return poison_reply();
+  auto *body = reinterpret_cast<RpcMmapResponse *>(response_buffer + sizeof(RpcHeader));
+  *backing_out = body->backing;
+  *memfd_out = (num_fds > 0) ? received_fds[0] : -1;
   return resp->result;
 }
 

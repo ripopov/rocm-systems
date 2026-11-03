@@ -8,6 +8,7 @@
 #define ROCJITSU_VM_AMDGPU_INSTRUCTION_COMPUTE_UNIT_VIEW_H_
 
 #include "rocjitsu/code/rj_code.h"
+#include "rocjitsu/vm/amdgpu/queue_exception.h"
 #include "simdojo/sim/sim_types.h"
 
 #include <cstdint>
@@ -34,15 +35,6 @@ struct TensorDmaMemoryAccessObservation;
 class Wavefront;
 
 /// @brief Completion contract for a deferred runtime queue exception.
-enum class QueueExceptionDeliveryPolicy {
-  /// Preserve the trap-handler acknowledgment and debugger-ownership protocol.
-  WaitForAcknowledgment,
-  /// Publish without waiting for ROCr; fail the engine if publication fails.
-  PublishOrFail,
-  /// Publish without waiting; the caller cancels all queue replicas and fails
-  /// the engine after their acknowledgments, even if publication fails.
-  PublishAndCancel,
-};
 
 /// @brief Narrow CU API exposed to AMDGPU instruction emulation code.
 ///

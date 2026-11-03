@@ -506,6 +506,10 @@ inline void FlushCpuCache(const void* base, size_t offset, size_t len) {
     cacheline_flush(cur);
     cur += cacheline_size;
   } while (cur <= (const char*)lastline);
+#if defined(__aarch64__) && defined(__linux__)
+  // Complete clean/invalidate operations before the caller publishes the buffer.
+  __asm__ __volatile__("dsb osh" ::: "memory");
+#endif
 }
 
 }  // namespace rocr

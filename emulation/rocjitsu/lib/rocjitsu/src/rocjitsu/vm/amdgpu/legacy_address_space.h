@@ -2184,7 +2184,21 @@ private:
     return true;
   }
 
+  /// @brief Upper bound of the host user address space, for identity pages.
+  /// @details Passthrough and identity translation reinterpret a GPU address
+  /// that has no page-table entry as a host pointer, so the address must first
+  /// be checked against the host's user range. That range is
+  /// architecture-specific: x86-64 with 4-level paging tops out at 2^47, while
+  /// aarch64 with a 48-bit VA gives user space the full low 2^48, where Linux
+  /// places PIE images and top-down mmap regions. Hardcoding the x86-64 bound
+  /// made every aarch64 host address above 128 TiB -- including the SVM ranges
+  /// ROCr registers for pageable buffers -- fail translation, so reads and
+  /// writes fell through to sparse memory instead of the real host page.
+#if defined(__aarch64__)
+  static constexpr uint64_t kUserSpaceLimit = 1ULL << 48;
+#else
   static constexpr uint64_t kUserSpaceLimit = 0x800000000000ULL;
+#endif
 
   /// @brief A passthrough page, reachable only through a checked operation.
   ///

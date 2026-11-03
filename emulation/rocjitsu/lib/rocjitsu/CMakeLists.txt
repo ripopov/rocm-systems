@@ -45,6 +45,10 @@ option(
     "Build the standalone offline ConSan analyzer"
     OFF
 )
+if(RJ_KMD_SERVER_ONLY)
+    add_subdirectory(src/rocjitsu/kmd)
+    return()
+endif()
 
 add_subdirectory(src/rocjitsu/code/analysis)
 add_subdirectory(src/rocjitsu/code)

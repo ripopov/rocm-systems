@@ -12,6 +12,7 @@
 /// passed through SCM_RIGHTS. The client maps them locally through the backing
 /// adapter at the addresses ROCR's FMM expects.
 
+#include "rocjitsu/kmd/linux/memory_backing.h"
 #include "rocjitsu/kmd/linux/sysfs.h"
 #include "rocjitsu/vm/driver.h"
 
@@ -27,6 +28,8 @@
 #include <vector>
 
 namespace rocjitsu {
+
+struct RpcSharedBacking;
 
 /// @brief What Yama's ptrace_scope implies for the daemon's cross-process reads.
 /// @details Only one of these states makes the grant both necessary and
@@ -202,7 +205,9 @@ private:
   void watch_disconnect(int socket);
   void request_close();
   int send_ioctl(unsigned long request, void *arg);
-  int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset, int *backing_out);
+  int send_ioctl_locked(unsigned long request, void *arg);
+  int send_mmap(void *addr, size_t length, int prot, int flags, off_t offset, int *memfd_out,
+                RpcSharedBacking *backing_out);
 
   /// @brief Mark the RPC stream unusable and make the connection terminal.
   /// @details Called from every framing failure — a half-written request, a
@@ -245,8 +250,13 @@ private:
   /// socket writes without this lock, corrupting the RPC stream.
   std::mutex rpc_mutex_;
 
-  /// @brief Backing descriptors received during ALLOC_MEMORY, keyed by handle.
-  std::unordered_map<uint64_t, int> handle_backings_;
+  /// @brief Memfds received from the daemon during ALLOC_MEMORY, keyed by handle.
+  struct AllocationBacking {
+    MemoryBackingRange range;
+    uint64_t userptr_address = 0;
+    uint64_t userptr_size = 0;
+  };
+  std::unordered_map<uint64_t, AllocationBacking> handle_backings_;
 
   /// @brief Maps GPUVM addresses to allocation backings for anonymous MAP_FIXED
   /// interception. When ROCR's FMM does anonymous MAP_FIXED at a GPUVM address
@@ -255,7 +265,7 @@ private:
   struct AllocRange {
     uint64_t va;
     uint64_t size;
-    int backing_fd;
+    MemoryBackingRange backing;
   };
   std::vector<AllocRange> alloc_ranges_;
 };

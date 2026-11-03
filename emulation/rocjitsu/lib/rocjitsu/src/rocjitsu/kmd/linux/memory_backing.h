@@ -15,12 +15,34 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 namespace rocjitsu {
+
+/// @brief A borrowed byte range within a native file or opaque backing token.
+/// @details This value neither closes the descriptor nor retains storage. Its
+/// owner must keep both alive while the range is used. The permitted slice can
+/// be smaller than the underlying backing; subranges must respect that slice.
+struct MemoryBackingRange {
+  int fd = -1;
+  uint64_t offset = 0;
+  uint64_t size = 0;
+};
+
+/// @brief Check offset/size representability and storage bounds without resizing.
+/// @details Zero-length ranges are allowed. Returns zero on success, or -1 with
+/// errno set. Metadata is queried through the native-file/token adapter.
+int check_memory_backing_range(const MemoryBackingRange &range);
+
+/// @brief Restrict a borrowed range using an offset relative to its permitted slice.
+/// @details Rejects overflow, unrepresentable file offsets and out-of-slice
+/// requests. Does not query metadata or change descriptor ownership or errno.
+std::optional<MemoryBackingRange> memory_backing_subrange(const MemoryBackingRange &range,
+                                                          uint64_t offset, uint64_t size);
 
 /// @brief Flags shared by token mapping and the public VM mapper.
 /// @details MAP_SHARED is required; the placement flags are optional.

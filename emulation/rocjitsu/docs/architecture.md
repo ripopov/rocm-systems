@@ -250,17 +250,17 @@ See [codegen.md](codegen.md) for the full codegen pipeline and
 regeneration commands. See [isa-target-providers.md](isa-target-providers.md)
 for target identity, static provider composition, and model-only linkage.
 
-### KMD — Kernel Mode Driver Emulation (`kmd/linux/`)
+### KMD — Kernel Mode Driver Emulation (`kmd/`)
 
 Emulates the AMDKFD kernel driver via LD_PRELOAD interposition:
 
 - **Interposer** — Intercepts `open`, `close`, `ioctl`, `mmap`,
   `munmap`, `fopen`, `dup2`, `fork` to route `/dev/kfd` operations.
-- **SimulatedDriver** — Handles KFD ioctls (create_queue,
+- **SimulatedKfd** — Handles KFD ioctls (create_queue,
   alloc_memory, map_memory, wait_events, etc.). Manages per-process
   state (page tables, doorbells, events).
 - **RemoteDriver** — Client-side RPC stub for daemon mode. Forwards
-  ioctls over a Unix socket to the daemon's SimulatedDriver.
+  ioctls over a Unix socket to the server's SimulatedKfd.
 - **EventState** — KFD event lifecycle (create, set, reset, wait,
   destroy). Signal page uses the same shared backing as GPU allocations.
 
@@ -269,6 +269,21 @@ GPU allocations, doorbells, event pages, and GEM objects use the private
 file-size limits. It provides native memfds or shared-memory tokens consumed
 through the `memory_backing` adapters. See [KFD and GEM memory backing](memory-backing.md)
 for allocation policy, mapping semantics, resource limits, and helper lifecycle.
+
+This fork separates KFD policy from device execution through `DeviceBackend`.
+`SimdojoDeviceBackend` programs rocjitsu's execution model; `CallbackDeviceBackend`
+calls an embedding host through the versioned
+[C interface](../lib/rocjitsu/include/rocjitsu/kmd/server.h). Both RPC hosts use
+`KmdRpcServer → KfdRpcDevice → SimulatedKfd`; the native daemon separately owns
+its VM and engine lifetime. The server-only library does not link simdojo.
+The C interface is in-process; Unix-socket RPC connects processes.
+
+Native wave/trap handling and CWSR execution belong to the simdojo adapter.
+KFD owns debugger authorization and event policy, exposed through the private
+`DeviceEvents` interface. KFD quiesces execution before detaching callbacks and
+releasing process resources. Allocation leases can survive exporter exit through
+IPC imports. Expected backend failures return negative errno; failed teardown
+must stop device accesses before releasing storage.
 
 ### Code — Executable Loading & Analysis (`code/`)
 

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
+#include <limits>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <poll.h>
@@ -46,6 +47,73 @@ protected:
     ASSERT_EQ(std::fflush(stdout), 0);
   }
 };
+
+TEST_F(MemoryBackingDeathTest, BareExecutableNameFindsKeeperOutsideWorkingDirectory) {
+  constexpr const char *marker = "RJ_TEST_BARE_EXECUTABLE_KEEPER";
+  if (std::getenv(marker)) {
+    const int backing = rocjitsu::create_memory_backing(kSize);
+    ASSERT_GE(backing, 0);
+    struct stat info {};
+    EXPECT_EQ(rocjitsu::stat_memory_backing(backing, &info), 0);
+    EXPECT_EQ(info.st_size, kSize);
+    close(backing);
+    return;
+  }
+  ASSERT_EXIT(
+      {
+        if (setenv(marker, "1", 1) != 0 || chdir("/") != 0)
+          _exit(126);
+        // Linux supplies argv[0] to dladdr for the main executable. A PATH
+        // launch must still find its own keeper from a different directory.
+        execl("/proc/self/exe", "rocjitsu-tests-bare-name",
+              "--gtest_filter=MemoryBackingDeathTest."
+              "BareExecutableNameFindsKeeperOutsideWorkingDirectory",
+              nullptr);
+        _exit(127);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
+void check_backing_ranges() {
+  for (const char *force_token : {"0", "1"}) {
+    setenv("RJ_TEST_FORCE_TOKEN_BACKING", force_token, 1);
+    const int descriptor = rocjitsu::create_memory_backing(kSize);
+    ASSERT_GE(descriptor, 0);
+    const rocjitsu::MemoryBackingRange permitted{descriptor, 4096, 8192};
+    EXPECT_EQ(rocjitsu::check_memory_backing_range(permitted), 0);
+    const auto slice = rocjitsu::memory_backing_subrange(permitted, 4096, 4096);
+    ASSERT_TRUE(slice);
+    EXPECT_EQ(slice->fd, descriptor);
+    EXPECT_EQ(slice->offset, 8192u);
+    EXPECT_EQ(slice->size, 4096u);
+    void *mapped = rocjitsu::map_memory_backing(nullptr, slice->size, PROT_READ | PROT_WRITE,
+                                                MAP_SHARED, slice->fd, slice->offset);
+    ASSERT_NE(mapped, MAP_FAILED);
+    static_cast<char *>(mapped)[0] = 42;
+    EXPECT_EQ(munmap(mapped, slice->size), 0);
+    // The whole file has room, but the permitted slice does not.
+    EXPECT_FALSE(rocjitsu::memory_backing_subrange(permitted, 8192, 1));
+    EXPECT_FALSE(rocjitsu::memory_backing_subrange(permitted, UINT64_MAX, 1));
+    EXPECT_EQ(rocjitsu::check_memory_backing_range({descriptor, kSize, 1}), -1);
+    EXPECT_EQ(errno, EINVAL);
+    EXPECT_EQ(rocjitsu::check_memory_backing_range({descriptor, kSize, 0}), 0);
+    EXPECT_EQ(rocjitsu::check_memory_backing_size(descriptor, 0), 0);
+    const uint64_t max_offset = std::numeric_limits<off_t>::max();
+    EXPECT_FALSE(rocjitsu::memory_backing_subrange({descriptor, max_offset, 1}, 0, 1));
+    EXPECT_EQ(rocjitsu::check_memory_backing_range({descriptor, max_offset, 1}), -1);
+    EXPECT_EQ(errno, EINVAL);
+    EXPECT_EQ(close(descriptor), 0); // Borrowing never closed or replaced it.
+  }
+}
+
+TEST_F(MemoryBackingDeathTest, RangesPreserveSliceBoundsForNativeAndTokenStorage) {
+  ASSERT_EXIT(
+      {
+        check_backing_ranges();
+        _exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
 
 void check_device_backing_identity() {
   const std::string name = std::string(rocjitsu::kmd::kDeviceBackingNamePrefix) + "129";

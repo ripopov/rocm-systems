@@ -49,7 +49,7 @@ struct RpcHeader {
 };
 
 /// @brief RPC protocol version. Increment when making breaking changes.
-inline constexpr uint32_t kRpcProtocolVersion = 6;
+inline constexpr uint32_t kRpcProtocolVersion = 7;
 
 /// @brief Largest payload the daemon accepts after an RpcHeader.
 /// @details The daemon rejects — and disconnects — any client whose header
@@ -89,9 +89,17 @@ struct RpcMmapRequest {
   int64_t offset;  ///< KFD mmap offset encoding (type + gpu_id + handle).
 };
 
+/// @brief Range in a transferred backing descriptor; never permission to resize it.
+/// For ioctl replies carrying SCM_RIGHTS, this precedes the ioctl argument payload.
+struct RpcSharedBacking {
+  uint64_t offset;
+  uint64_t size;
+};
+
 /// @brief mmap response payload (when opcode == RPC_MMAP).
 struct RpcMmapResponse {
   uint64_t mapped_addr; ///< Address the daemon mapped at (informational).
+  RpcSharedBacking backing;
 };
 
 /// @brief munmap request payload (when opcode == RPC_MUNMAP).
@@ -105,7 +113,8 @@ static_assert(sizeof(RpcGpuInfo) == 328);
 static_assert(sizeof(RpcHandshakeResponse) == 352);
 static_assert(sizeof(RpcIoctlRequest) == 8);
 static_assert(sizeof(RpcMmapRequest) == 32);
-static_assert(sizeof(RpcMmapResponse) == 8);
+static_assert(sizeof(RpcSharedBacking) == 16);
+static_assert(sizeof(RpcMmapResponse) == 24);
 static_assert(sizeof(RpcMunmapRequest) == 16);
 
 /// @brief Send a message with optional ancillary file descriptors.

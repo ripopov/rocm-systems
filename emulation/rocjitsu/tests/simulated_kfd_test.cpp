@@ -5,9 +5,12 @@
 /// @brief SimulatedKfd lifecycle, allocation, sharing, and topology tests.
 
 #include "rocjitsu/config/config_loader.h"
+#include "rocjitsu/kmd/device/simdojo_device_backend.h"
 #include "rocjitsu/kmd/linux/guest_kfd.h"
 #include "rocjitsu/kmd/linux/memory_backing.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
+#include "rocjitsu/vm/amdgpu/compute_unit.h"
+#include "rocjitsu/vm/amdgpu/wavefront.h"
 #include "rocjitsu/vm/rj_vm.h"
 #include "rocjitsu/vm/rj_vm_impl.h"
 #include "rocjitsu/vm/virtual_machine.h"
@@ -129,6 +132,143 @@ TEST_F(SimulatedKfdTest, MissingConfigReturnsFailureWithoutThrowing) {
   auto result = create_test_vm(diagnostic.emitter(), path);
   EXPECT_TRUE(result.failed());
   EXPECT_EQ(diagnostic.message(), "Cannot open file: " + path);
+}
+
+TEST_F(SimulatedKfdTest, UserptrUsesCpuAddressRatherThanGpuAddress) {
+  util::StringDiagnostic diagnostic;
+  auto result = create_test_vm(diagnostic.emitter());
+  ASSERT_TRUE(result.succeeded()) << diagnostic.message();
+  auto t = std::move(result).value();
+  auto *driver = t.driver();
+  ASSERT_NE(driver, nullptr);
+  ASSERT_GE(driver->open(), 0);
+  auto *cpu = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(cpu, MAP_FAILED);
+  *static_cast<uint32_t *>(cpu) = 17;
+  kfd_ioctl_alloc_memory_of_gpu_args alloc{};
+  alloc.va_addr = 0x123400000000ULL;
+  alloc.mmap_offset = reinterpret_cast<uint64_t>(cpu);
+  alloc.size = 4096;
+  alloc.gpu_id = driver->gpu_id();
+  alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
+  ASSERT_EQ(driver->ioctl(AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &alloc), 0);
+  const auto access = t.soc()->gpu_vm().snapshot_vmid(driver->local_process_id());
+  ASSERT_TRUE(access);
+  uint32_t value = 0;
+  EXPECT_EQ(access->read(alloc.va_addr, std::as_writable_bytes(std::span(&value, 1))),
+            rocjitsu::amdgpu::VmAccessOutcome::Complete);
+  EXPECT_EQ(value, 17);
+  const uint32_t replacement = 29;
+  EXPECT_EQ(access->write(alloc.va_addr, std::as_bytes(std::span(&replacement, 1))),
+            rocjitsu::amdgpu::VmAccessOutcome::Complete);
+  EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
+  EXPECT_EQ(driver->close(), 0);
+  // Registration does not transfer ownership of the application's storage.
+  EXPECT_EQ(*static_cast<uint32_t *>(cpu), 29);
+  EXPECT_EQ(::munmap(cpu, 4096), 0);
+}
+
+TEST_F(SimulatedKfdTest, NativeEventPolicyIsDetachedAndCanBeReattached) {
+  class RecordingEvents final : public rocjitsu::kmd::DeviceEvents {
+  public:
+    unsigned calls = 0;
+    uint32_t doorbell = 9;
+    std::optional<rocjitsu::kmd::DeviceEventContext> event_context(uint32_t process,
+                                                                   uint32_t queue) override {
+      ++calls;
+      rocjitsu::kmd::DeviceEventContext context;
+      context.process_id = process;
+      context.queue_id = queue;
+      context.doorbell_id = doorbell;
+      return context;
+    }
+    uint32_t matching_watchpoints(uint32_t, uint64_t, uint32_t, bool, bool) override { return 0; }
+    uint64_t claim_debug_exception(uint32_t, uint32_t, uint64_t, bool) override { return 0; }
+    void reserve_runtime_exception(uint32_t, uint32_t, uint64_t) override {}
+    rocjitsu::kmd::DeviceDebugEventResult
+    publish_debug_stop(const rocjitsu::kmd::DeviceDebugEvent &) override {
+      return {};
+    }
+    bool deliver_runtime_exception(uint32_t, uint32_t, uint32_t, uint64_t, bool, bool) override {
+      return false;
+    }
+    void finish_runtime_exception(uint32_t, uint32_t, uint64_t, bool, bool) override {}
+  } policy;
+  util::StringDiagnostic diagnostic;
+  auto result = create_test_vm(diagnostic.emitter());
+  ASSERT_TRUE(result.succeeded()) << diagnostic.message();
+  auto vm = std::move(result).value();
+  ASSERT_FALSE(vm.soc()->all_cus().empty());
+  auto *cu = vm.soc()->all_cus().front();
+  auto *wave = cu->dispatch_wf(0, 0, 16, 4);
+  ASSERT_NE(wave, nullptr);
+  wave->set_process_id(101);
+  wave->set_queue_id(17);
+  constexpr uint32_t kGetDoorbell = 10;
+  {
+    rocjitsu::kmd::SimdojoDeviceBackend backend(*vm.soc(), 0, &policy);
+    ASSERT_EQ(backend.configure({}, 1, {}), 0);
+    wave->set_exec(0x1234567800000000ULL);
+    EXPECT_TRUE(cu->handle_sendmsg(*wave, kGetDoorbell));
+    EXPECT_EQ(wave->exec(), 0x1234567800000009ULL);
+    EXPECT_EQ(policy.calls, 1u);
+    backend.detach_callbacks();
+    backend.detach_callbacks();
+    EXPECT_FALSE(cu->handle_sendmsg(*wave, kGetDoorbell));
+    EXPECT_EQ(wave->exec(), 0x1234567800000009ULL);
+    EXPECT_EQ(policy.calls, 1u);
+    policy.doorbell = 13;
+    ASSERT_EQ(backend.configure({}, 1, {}), 0);
+    EXPECT_TRUE(cu->handle_sendmsg(*wave, kGetDoorbell));
+    EXPECT_EQ(wave->exec(), 0x123456780000000DULL);
+  }
+  EXPECT_FALSE(cu->handle_sendmsg(*wave, kGetDoorbell));
+  EXPECT_EQ(policy.calls, 2u);
+}
+
+TEST_F(SimulatedKfdTest, DeviceProcessMappingIsolationRemapAndTeardown) {
+  util::StringDiagnostic diagnostic;
+  auto result = create_test_vm(diagnostic.emitter());
+  ASSERT_TRUE(result.succeeded()) << diagnostic.message();
+  auto t = std::move(result).value();
+  auto *vm = dynamic_cast<rocjitsu::VirtualMachine *>(t.engine->topology().root());
+  ASSERT_NE(vm, nullptr);
+  rocjitsu::kmd::SimdojoDeviceBackend backend(*vm->soc(0), 0);
+  rocjitsu::KfdProcess first(101, 1);
+  rocjitsu::KfdProcess second(102, 1);
+  alignas(4096) std::array<uint64_t, 512> first_page{};
+  alignas(4096) std::array<uint64_t, 512> second_page{};
+  constexpr uint64_t address = 0x100000000;
+  first_page[0] = 17;
+  second_page[0] = 29;
+  first.map_pages(address, first_page.data(), sizeof(first_page), rocjitsu::amdgpu::Mtype::UC);
+  second.map_pages(address, second_page.data(), sizeof(second_page), rocjitsu::amdgpu::Mtype::UC);
+  ASSERT_EQ(backend.register_process(first, false), 0);
+  ASSERT_EQ(backend.register_process(second, false), 0);
+  uint64_t observed = 0;
+  EXPECT_EQ(backend.read64(first.process_id(), address, observed), 0);
+  EXPECT_EQ(observed, 17u);
+  EXPECT_EQ(backend.read64(second.process_id(), address, observed), 0);
+  EXPECT_EQ(observed, 29u);
+  EXPECT_EQ(backend.write64(first.process_id(), address, 43), 0);
+  EXPECT_EQ(first_page[0], 43);
+  EXPECT_EQ(second_page[0], 29);
+
+  first.unmap_pages(address, sizeof(first_page));
+  first.map_pages(address, second_page.data(), sizeof(second_page), rocjitsu::amdgpu::Mtype::UC);
+  EXPECT_EQ(backend.read64(first.process_id(), address, observed), 0);
+  EXPECT_EQ(observed, 29u);
+  backend.unregister_process(first.process_id());
+  EXPECT_EQ(backend.read64(first.process_id(), address, observed), -EFAULT);
+  EXPECT_EQ(observed, 29u);
+  EXPECT_EQ(backend.write64(first.process_id(), address, 99), -EFAULT);
+  EXPECT_EQ(backend.set_process_client_pid(first.process_id(), 1234), -ESRCH);
+  EXPECT_EQ(backend.set_process_mem_fd(first.process_id(), 3), -ESRCH);
+  EXPECT_EQ(backend.set_process_mem_fd(first.process_id(), -1), 0);
+  EXPECT_EQ(backend.read64(second.process_id(), address, observed), 0);
+  EXPECT_EQ(observed, 29u);
+  backend.unregister_process(second.process_id());
+  EXPECT_EQ(backend.read64(second.process_id(), address, observed), -EFAULT);
 }
 
 TEST_F(SimulatedKfdTest, CreateDefault) {

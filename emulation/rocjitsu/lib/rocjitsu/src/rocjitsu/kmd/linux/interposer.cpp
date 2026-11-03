@@ -404,7 +404,7 @@ void rj_sigsegv_handler(int, siginfo_t *, void *) {
 }
 
 __attribute__((constructor)) void rj_install_signal_handler() {
-  struct sigaction sa {};
+  struct sigaction sa{};
   sa.sa_sigaction = rj_sigsegv_handler;
   sa.sa_flags = SA_SIGINFO;
   sigaction(SIGSEGV, &sa, nullptr);
@@ -420,7 +420,7 @@ void preallocate_backing_fd_table() {
       static_cast<const char *>(dlsym(RTLD_DEFAULT, "__libc_single_threaded"));
   if (!single_threaded || !*single_threaded)
     return;
-  struct rlimit original {};
+  struct rlimit original{};
   if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, nullptr, &original) != 0)
     return;
   const bool raise_limit = original.rlim_cur <= SimulatedKfd::kBackingFdMin;
@@ -498,7 +498,7 @@ public:
     // bind mounts; a name comparison does not. Absent host KFD leaves it 0, which
     // matches nothing.
     {
-      struct stat kfd_st {};
+      struct stat kfd_st{};
       if (::stat("/dev/kfd", &kfd_st) == 0 && S_ISCHR(kfd_st.st_mode))
         ctx.host_kfd_rdev_ = kfd_st.st_rdev;
     }
@@ -587,7 +587,7 @@ public:
         int fd = 0;
         for (const char *digit = name; *digit >= '0' && *digit <= '9'; ++digit)
           fd = fd * 10 + (*digit - '0');
-        struct stat info {};
+        struct stat info{};
         long status;
         do {
           status = syscall(SYS_fstat, fd, &info);
@@ -4343,7 +4343,7 @@ inline void rj_path_normalize(char *p) {
     rj_path_normalize(resolved);
     return rj_path_names_emulated_endpoint(resolved);
   }
-  struct stat st {};
+  struct stat st{};
   const int rc = real.fstat_fn(probe, &st);
   real.close(probe);
   if (rc != 0)
@@ -4361,7 +4361,7 @@ inline void rj_path_normalize(char *p) {
   auto &real = InterposerContext::real();
   if (!real.fstat_fn)
     return false;
-  struct stat st {};
+  struct stat st{};
   if (real.fstat_fn(fd, &st) != 0)
     return false;
   return rj_is_gpu_device_stat(st);
@@ -4399,7 +4399,7 @@ inline void rj_path_normalize(char *p) {
   int fd = real.openat(dirfd, path, flags, mode);
   if (fd < 0)
     return fd;
-  struct stat st {};
+  struct stat st{};
   if (real.fstat_fn && real.fstat_fn(fd, &st) == 0 && rj_is_gpu_device_stat(st)) {
     real.close(fd);
     errno = ENODEV;
@@ -5389,7 +5389,14 @@ RJ_INTERPOSER_EXPORT int dup2(int oldfd, int newfd) {
   if (!rj_owns_interposer_state()) {
     if (rj_child_refuses_fd(oldfd))
       return -1;
+#ifdef SYS_dup2
     return static_cast<int>(syscall(SYS_dup2, oldfd, newfd));
+#else
+    // dup3 rejects equal descriptors; dup2 must validate and return the fd.
+    if (oldfd == newfd)
+      return syscall(SYS_fcntl, oldfd, F_GETFD) < 0 ? -1 : oldfd;
+    return static_cast<int>(syscall(SYS_dup3, oldfd, newfd, 0));
+#endif
   }
   // dup2(fd, fd) is a POSIX no-op that leaves the descriptor live; mutating
   // tracking would drop a still-open ref. Forward without touching tracking.
@@ -5942,7 +5949,7 @@ RJ_INTERPOSER_EXPORT FILE *fopen(const char *path, const char *mode) {
     FILE *stream = InterposerContext::real().fopen(path, mode);
     if (!stream)
       return nullptr;
-    struct stat st {};
+    struct stat st{};
     const int fd = fileno(stream);
     if (fd >= 0 && InterposerContext::real().fstat_fn &&
         rocjitsu::stat_memory_backing(fd, &st) == 0 && rj_is_gpu_device_stat(st)) {
@@ -6001,7 +6008,7 @@ RJ_INTERPOSER_EXPORT FILE *freopen(const char *path, const char *mode, FILE *str
     FILE *reopened = InterposerContext::real().freopen(path, mode, stream);
     if (!reopened)
       return nullptr;
-    struct stat st {};
+    struct stat st{};
     const int fd = fileno(reopened);
     if (fd >= 0 && InterposerContext::real().fstat_fn &&
         rocjitsu::stat_memory_backing(fd, &st) == 0 && rj_is_gpu_device_stat(st)) {

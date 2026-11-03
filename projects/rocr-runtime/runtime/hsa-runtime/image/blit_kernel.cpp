@@ -64,47 +64,10 @@ extern uint8_t blit_object_gfx7xx[14608];
 extern uint8_t blit_object_gfx8xx[15424];
 extern uint8_t blit_object_gfx9xx[15432];
 
-extern uint8_t ocl_blit_object_gfx700[];
-extern uint8_t ocl_blit_object_gfx701[];
-extern uint8_t ocl_blit_object_gfx702[];
-extern uint8_t ocl_blit_object_gfx801[];
-extern uint8_t ocl_blit_object_gfx802[];
-extern uint8_t ocl_blit_object_gfx803[];
-extern uint8_t ocl_blit_object_gfx805[];
-extern uint8_t ocl_blit_object_gfx810[];
-extern uint8_t ocl_blit_object_gfx900[];
-extern uint8_t ocl_blit_object_gfx902[];
-extern uint8_t ocl_blit_object_gfx904[];
-extern uint8_t ocl_blit_object_gfx906[];
-extern uint8_t ocl_blit_object_gfx908[];
-extern uint8_t ocl_blit_object_gfx909[];
-extern uint8_t ocl_blit_object_gfx90a[];
-extern uint8_t ocl_blit_object_gfx90c[];
-extern uint8_t ocl_blit_object_gfx942[];
-extern uint8_t ocl_blit_object_gfx950[];
-extern uint8_t ocl_blit_object_gfx1010[];
-extern uint8_t ocl_blit_object_gfx1011[];
-extern uint8_t ocl_blit_object_gfx1012[];
-extern uint8_t ocl_blit_object_gfx1013[];
-extern uint8_t ocl_blit_object_gfx1030[];
-extern uint8_t ocl_blit_object_gfx1031[];
-extern uint8_t ocl_blit_object_gfx1032[];
-extern uint8_t ocl_blit_object_gfx1033[];
-extern uint8_t ocl_blit_object_gfx1034[];
-extern uint8_t ocl_blit_object_gfx1035[];
-extern uint8_t ocl_blit_object_gfx1036[];
-extern uint8_t ocl_blit_object_gfx1100[];
-extern uint8_t ocl_blit_object_gfx1101[];
-extern uint8_t ocl_blit_object_gfx1102[];
-extern uint8_t ocl_blit_object_gfx1103[];
-extern uint8_t ocl_blit_object_gfx1150[];
-extern uint8_t ocl_blit_object_gfx1151[];
-extern uint8_t ocl_blit_object_gfx1152[];
-extern uint8_t ocl_blit_object_gfx1153[];
-extern uint8_t ocl_blit_object_gfx1170[];
-extern uint8_t ocl_blit_object_gfx1171[];
-extern uint8_t ocl_blit_object_gfx1200[];
-extern uint8_t ocl_blit_object_gfx1201[];
+// Declarations and dispatch must use the same target list as the compiled blobs.
+#define ROCR_IMAGE_BLIT_TARGET(target) extern uint8_t ocl_blit_object_##target[];
+#include "image_blit_targets.inc"
+#undef ROCR_IMAGE_BLIT_TARGET
 
 // Arguments inserted by OCL compiler, all zero here.
 struct OCLHiddenArgs {
@@ -988,93 +951,16 @@ hsa_status_t BlitKernel::GetPatchedBlitObject(const char* agent_name,
                                               uint8_t** blit_code_object) {
   std::string sname(agent_name);
 
-  if (sname == "gfx700") {
-    *blit_code_object = ocl_blit_object_gfx700;
-  } else if (sname == "gfx701") {
-    *blit_code_object = ocl_blit_object_gfx701;
-  } else if (sname == "gfx702") {
-    *blit_code_object = ocl_blit_object_gfx702;
-  } else if (sname == "gfx801") {
-    *blit_code_object = ocl_blit_object_gfx801;
-  } else if (sname == "gfx802") {
-    *blit_code_object = ocl_blit_object_gfx802;
-  } else if (sname == "gfx803") {
-    *blit_code_object = ocl_blit_object_gfx803;
-  } else if (sname == "gfx805") {
-    *blit_code_object = ocl_blit_object_gfx805;
-  } else if (sname == "gfx810") {
-    *blit_code_object = ocl_blit_object_gfx810;
-  } else if (sname == "gfx900") {
-    *blit_code_object = ocl_blit_object_gfx900;
-  } else if (sname == "gfx902") {
-    *blit_code_object = ocl_blit_object_gfx902;
-  } else if (sname == "gfx904") {
-    *blit_code_object = ocl_blit_object_gfx904;
-  } else if (sname == "gfx906") {
-    *blit_code_object = ocl_blit_object_gfx906;
-  } else if (sname == "gfx908") {
-    *blit_code_object = ocl_blit_object_gfx908;
-  } else if (sname == "gfx909") {
-    *blit_code_object = ocl_blit_object_gfx909;
-  } else if (sname == "gfx90a") {
-    *blit_code_object = ocl_blit_object_gfx90a;
-  } else if (sname == "gfx90c") {
-    *blit_code_object = ocl_blit_object_gfx90c;
-  } else if (sname == "gfx942") {
-    *blit_code_object = ocl_blit_object_gfx942;
-  } else if (sname == "gfx950") {
-    *blit_code_object = ocl_blit_object_gfx950;
-  } else if (sname == "gfx1010") {
-    *blit_code_object = ocl_blit_object_gfx1010;
-  } else if (sname == "gfx1011") {
-    *blit_code_object = ocl_blit_object_gfx1011;
-  } else if (sname == "gfx1012") {
-    *blit_code_object = ocl_blit_object_gfx1012;
-  } else if (sname == "gfx1013") {
-    *blit_code_object = ocl_blit_object_gfx1013;
-  } else if (sname == "gfx1030") {
-    *blit_code_object = ocl_blit_object_gfx1030;
-  } else if (sname == "gfx1031") {
-    *blit_code_object = ocl_blit_object_gfx1031;
-  } else if (sname == "gfx1032") {
-    *blit_code_object = ocl_blit_object_gfx1032;
-  } else if (sname == "gfx1033") {
-    *blit_code_object = ocl_blit_object_gfx1033;
-  } else if (sname == "gfx1034") {
-    *blit_code_object = ocl_blit_object_gfx1034;
-  } else if (sname == "gfx1035") {
-    *blit_code_object = ocl_blit_object_gfx1035;
-  } else if (sname == "gfx1036") {
-    *blit_code_object = ocl_blit_object_gfx1036;
-  } else if (sname == "gfx1100") {
-    *blit_code_object = ocl_blit_object_gfx1100;
-  } else if (sname == "gfx1101") {
-    *blit_code_object = ocl_blit_object_gfx1101;
-  } else if (sname == "gfx1102") {
-    *blit_code_object = ocl_blit_object_gfx1102;
-  } else if (sname == "gfx1103") {
-    *blit_code_object = ocl_blit_object_gfx1103;
-  } else if (sname == "gfx1150") {
-    *blit_code_object = ocl_blit_object_gfx1150;
-  } else if (sname == "gfx1151") {
-    *blit_code_object = ocl_blit_object_gfx1151;
-  } else if (sname == "gfx1152") {
-    *blit_code_object = ocl_blit_object_gfx1152;
-  } else if (sname == "gfx1153") {
-    *blit_code_object = ocl_blit_object_gfx1153;
-  } else if (sname == "gfx1170") {
-    *blit_code_object = ocl_blit_object_gfx1170;
-  } else if (sname == "gfx1171") {
-    *blit_code_object = ocl_blit_object_gfx1171;
-  } else if (sname == "gfx1200") {
-    *blit_code_object = ocl_blit_object_gfx1200;
-  } else if (sname == "gfx1201") {
-    *blit_code_object = ocl_blit_object_gfx1201;
-  } else {
-    return HSA_STATUS_ERROR_INVALID_ISA_NAME;
+#define ROCR_IMAGE_BLIT_TARGET(target)                 \
+  if (sname == #target) {                             \
+    *blit_code_object = ocl_blit_object_##target;      \
+    return HSA_STATUS_SUCCESS;                       \
   }
+#include "image_blit_targets.inc"
+#undef ROCR_IMAGE_BLIT_TARGET
 
-  return HSA_STATUS_SUCCESS;
+  *blit_code_object = nullptr;
+  return HSA_STATUS_ERROR_INVALID_ISA_NAME;
 }
 
 }  // namespace image
