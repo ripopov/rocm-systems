@@ -3397,6 +3397,13 @@ uint64_t GpuAgent::TranslateTime(uint64_t tick) {
 
   // Valid ticks only need at most one SyncClocks.
   for (int i = 0; i < 2; i++) {
+    // An idle backend with a single clock can return the same calibration
+    // sample twice. Translation is identity and the slope would be 0/0.
+    if (t1_.GPUClockCounter == t0_.GPUClockCounter && t0_.GPUClockCounter != 0 &&
+        t0_.SystemClockCounter == t0_.GPUClockCounter &&
+        t1_.SystemClockCounter == t1_.GPUClockCounter) {
+      return tick;
+    }
     ratio = double(t1_.SystemClockCounter - t0_.SystemClockCounter) /
         double(t1_.GPUClockCounter - t0_.GPUClockCounter);
     elapsed = int64_t(ratio * double(int64_t(tick - t1_.GPUClockCounter)));

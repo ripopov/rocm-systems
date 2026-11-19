@@ -5,12 +5,14 @@
 #include "scoped_temp.h"
 #include "util/unique_handle.h"
 
+#include <cstddef>
 #include <future>
 #include <gtest/gtest.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <thread>
+#include <tuple>
 
 namespace rocjitsu {
 namespace {
@@ -21,7 +23,7 @@ template <typename T> T abi() {
   return value;
 }
 
-class KmdEmbeddingTest : public testing::TestWithParam<uint32_t> {
+class KmdEmbeddingTest : public testing::TestWithParam<std::tuple<uint32_t, size_t>> {
 protected:
   test::ScopedTempDirectory directory{"rj-c-embedding-"};
   const std::thread::id owner = std::this_thread::get_id();
@@ -71,7 +73,7 @@ protected:
     info.architecture = 3; // public rj_code_arch_t CDNA4 value
     info.gpu_id = 7;
     info.gfx_target_version = 90500;
-    info.num_xcc = GetParam();
+    info.num_xcc = std::get<0>(GetParam());
     info.drm_render_minor = 128;
     info.wave_front_size = 64;
     info.simd_per_cu = 4;
@@ -83,6 +85,7 @@ protected:
     config.runtime_root = directory.path().c_str();
     config.socket_path = socket_path.c_str();
     auto ops = operations();
+    ops.struct_size = std::get<1>(GetParam());
     char error[256]{};
     ASSERT_EQ(rj_kmd_server_create(&info, &config, &ops, &server, error, sizeof(error)), 0)
         << error;
@@ -171,7 +174,11 @@ TEST_P(KmdEmbeddingTest, RejectsWrongThreadAndInvalidDescriptors) {
   EXPECT_EQ(rj_kmd_server_set_quiescence_probe(server, nullptr, nullptr), 0);
 }
 
-INSTANTIATE_TEST_SUITE_P(Topology, KmdEmbeddingTest, testing::Values(1u, 8u));
+INSTANTIATE_TEST_SUITE_P(
+    TopologyAndCallbackTable, KmdEmbeddingTest,
+    testing::Combine(testing::Values(1u, 8u),
+                     testing::Values(offsetof(rj_kmd_backend_ops_t, read_clock),
+                                     sizeof(rj_kmd_backend_ops_t))));
 
 } // namespace
 } // namespace rocjitsu

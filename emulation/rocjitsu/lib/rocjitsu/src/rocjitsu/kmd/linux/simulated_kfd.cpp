@@ -1931,6 +1931,29 @@ int SimulatedKfd::close(uint32_t process_id) {
   return 0;
 }
 
+int SimulatedKfd::get_clock_counters_ioctl(void *arg) {
+  const int status = LinuxKfd::get_clock_counters_ioctl(arg);
+  if (status)
+    return status;
+
+  auto *counters = static_cast<kfd_ioctl_get_clock_counters_args *>(arg);
+  auto *gpu = find_gpu(counters->gpu_id);
+  if (!gpu)
+    return 0;
+  uint64_t timestamp = 0;
+  const int result = gpu->backend->read_clock(timestamp);
+  if (result == -ENOTSUP)
+    return 0;
+  if (result)
+    return result;
+
+  // Both members of the calibration pair must advance on the modeled
+  // device timeline, even if the CPU or host waits while simulation is idle.
+  counters->gpu_clock_counter = timestamp;
+  counters->system_clock_counter = timestamp;
+  return 0;
+}
+
 int SimulatedKfd::ioctl(unsigned long request, void *arg) {
   return ioctl(local_process_id_, request, arg);
 }

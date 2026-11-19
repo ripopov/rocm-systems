@@ -34,6 +34,7 @@ public:
                    uint32_t percentage) override;
   void destroy_queue(uint32_t process, uint32_t queue) override;
   void set_doorbell_base(uint32_t process, void *base) override;
+  int read_clock(uint64_t &nanoseconds) override;
   int read64(uint32_t process, uint64_t address, uint64_t &value) override;
   int write64(uint32_t process, uint64_t address, uint64_t value) override;
 

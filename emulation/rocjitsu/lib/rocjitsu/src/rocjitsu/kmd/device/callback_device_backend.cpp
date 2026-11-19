@@ -216,6 +216,16 @@ void CallbackDeviceBackend::set_doorbell_base(uint32_t process, void *base) {
   });
 }
 
+int CallbackDeviceBackend::read_clock(uint64_t &nanoseconds) {
+  if (!operations_.read_clock)
+    return -ENOTSUP;
+  return dispatcher_.invoke([&] {
+    if (int result = failure())
+      return result;
+    return status(operations_.read_clock(operations_.context, &nanoseconds));
+  });
+}
+
 int CallbackDeviceBackend::read64(uint32_t process, uint64_t address, uint64_t &value) {
   return dispatcher_.invoke([&] {
     if (int result = failure())

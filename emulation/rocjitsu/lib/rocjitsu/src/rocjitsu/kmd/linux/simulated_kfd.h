@@ -479,6 +479,8 @@ private:
   /// @return The matching KfdProcess, or nullptr if none matches.
   std::shared_ptr<KfdProcess> find_process_by_client_pid(pid_t pid) const;
 
+  int get_clock_counters_ioctl(void *arg) override;
+
   /// @brief Look up a GpuDevice by gpu_id. Returns nullptr if not found.
   GpuDevice *find_gpu(uint32_t gpu_id);
   const GpuDevice *find_gpu(uint32_t gpu_id) const;

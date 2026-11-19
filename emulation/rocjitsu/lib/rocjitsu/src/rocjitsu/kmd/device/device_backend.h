@@ -169,6 +169,9 @@ public:
   /// after unregister is allowed; a nonnull binding for an unknown process is
   /// a programming error rather than a recoverable device rejection.
   virtual void set_doorbell_base(uint32_t process, void *base) = 0;
+  /// Sample the backend's AQL profiling clock in nanoseconds, when available.
+  virtual int read_clock(uint64_t &) { return -ENOTSUP; }
+
   /// Return zero on success or negative errno. A failed read leaves value unchanged.
   virtual int read64(uint32_t process, uint64_t address, uint64_t &value) = 0;
   virtual int write64(uint32_t process, uint64_t address, uint64_t value) = 0;

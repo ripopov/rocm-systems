@@ -76,6 +76,11 @@ public:
       return host.write_result;
     };
     ops.shutdown = [](void *c) { ++get(c).shutdowns; };
+    ops.read_clock = [](void *c, uint64_t *nanoseconds) -> int32_t {
+      get(c);
+      *nanoseconds = 12345;
+      return 0;
+    };
     return ops;
   }
 };
@@ -94,6 +99,12 @@ TEST(CallbackDeviceBackendTest, CommonKfdUsesOwnerCallbacksAndRollsBackFailedQue
       const auto pid = driver.open_process();
       ASSERT_NE(pid, 0);
       EXPECT_EQ(device->active_processes(), 1u);
+      kfd_ioctl_get_clock_counters_args clocks{};
+      clocks.gpu_id = 7;
+      EXPECT_EQ(driver.ioctl(pid, AMDKFD_IOC_GET_CLOCK_COUNTERS, &clocks), 0);
+      EXPECT_EQ(clocks.gpu_clock_counter, 12345u);
+      EXPECT_EQ(clocks.system_clock_counter, 12345u);
+      EXPECT_EQ(clocks.system_clock_freq, 1000000000u);
       kfd_ioctl_create_queue_args queue{};
       queue.gpu_id = 7;
       queue.queue_percentage = 100;

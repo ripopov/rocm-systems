@@ -164,7 +164,10 @@ int32_t rj_kmd_server_create(const rj_kmd_device_info_t *info, const rj_kmd_serv
   if (output)
     *output = nullptr;
   return guard(nullptr, error, capacity, [&] {
-    if (!output || !valid(info) || !valid(config) || !valid(operations) || !config->socket_path ||
+    constexpr size_t required_ops_size = offsetof(rj_kmd_backend_ops_t, read_clock);
+    if (!output || !valid(info) || !valid(config) || !operations ||
+        operations->abi_version != RJ_KMD_SERVER_ABI_VERSION ||
+        operations->struct_size < required_ops_size || !config->socket_path ||
         !*config->socket_path || !info->gpu_id)
       return -EINVAL;
     if (info->architecture > ROCJITSU_CODE_ARCH_CDNA5 ||
@@ -178,8 +181,14 @@ int32_t rj_kmd_server_create(const rj_kmd_device_info_t *info, const rj_kmd_serv
     server->socket_path = config->socket_path;
     server->diagnostic = config->diagnostic;
     server->diagnostic_context = config->diagnostic_context;
+    // Older embedders end at shutdown; preserve that layout and its fallback.
+    rj_kmd_backend_ops_t ops{};
+    std::memcpy(&ops, operations,
+                operations->struct_size >= sizeof(ops) ? sizeof(ops) : required_ops_size);
+    // Internal consumers receive the full, zero-extended table.
+    ops.struct_size = sizeof(ops);
     auto backend = std::make_unique<rocjitsu::kmd::CallbackDeviceBackend>(
-        static_cast<rj_code_arch_t>(info->architecture), info->gpu_id, *operations,
+        static_cast<rj_code_arch_t>(info->architecture), info->gpu_id, ops,
         server->dispatcher);
     server->backend = backend.get();
     std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;

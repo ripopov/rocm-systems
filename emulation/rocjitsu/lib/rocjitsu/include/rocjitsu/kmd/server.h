@@ -258,6 +258,11 @@ typedef void (*rj_kmd_shutdown_fn)(void *context);
 /// processing while a teardown waits; device callbacks themselves never wait.
 typedef int32_t (*rj_kmd_quiescence_fn)(void *context, uint32_t process_id);
 
+/// Optional owner-thread sample of the backend's AQL profiling clock.
+/// The sampled counter and the timestamps in GPU signals are nanoseconds
+/// on the same timeline. Zero is reserved for an unavailable timestamp.
+typedef int32_t (*rj_kmd_read_clock_fn)(void *context, uint64_t *nanoseconds);
+
 typedef struct rj_kmd_backend_ops {
   uint32_t abi_version;
   uint32_t struct_size;
@@ -276,6 +281,7 @@ typedef struct rj_kmd_backend_ops {
   rj_kmd_write64_fn write64;
   rj_kmd_read64_fn read64;
   rj_kmd_shutdown_fn shutdown;
+  rj_kmd_read_clock_fn read_clock;
 } rj_kmd_backend_ops_t;
 
 typedef struct rj_kmd_poll_fd {
