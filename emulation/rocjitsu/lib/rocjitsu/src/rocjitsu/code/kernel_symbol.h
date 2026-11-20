@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -23,6 +24,11 @@ namespace rocjitsu {
 /// @returns Kernel name (without ".kd" suffix), or empty string on failure.
 std::string find_kernel_symbol(const uint8_t *kernel_object_ptr, const uint8_t *elf_base,
                                uint64_t elf_accessible);
+
+/// Resolve an exact descriptor symbol in a page-aligned allocation containing
+/// a loaded ROCr code object. Does not infer a name from metadata notes.
+std::string find_loaded_kernel_symbol(std::span<const uint8_t> allocation,
+                                      uint64_t descriptor_offset);
 
 /// Return a readable form of a kernel symbol.
 ///

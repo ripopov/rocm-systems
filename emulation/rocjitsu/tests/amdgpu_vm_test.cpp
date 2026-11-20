@@ -831,6 +831,7 @@ std::vector<uint8_t> make_loaded_kernel_symbol_elf(uint64_t kernel_descriptor_of
   Elf64_Ehdr ehdr{};
   std::memcpy(ehdr.e_ident, EI_MAGIC, EI_MAGIC_SIZE);
   ehdr.e_ident[EI_CLASS] = ELFCLASS64;
+  ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
   ehdr.e_ident[EI_OSABI] = ELFOSABI_AMDGPU_HSA;
   ehdr.e_type = ET_DYN;
   ehdr.e_machine = EM_AMDGPU;
@@ -863,12 +864,50 @@ std::vector<uint8_t> make_loaded_kernel_symbol_elf(uint64_t kernel_descriptor_of
 
   auto *sym = reinterpret_cast<Elf64_Sym *>(image.data() + symtab_offset);
   sym[1].st_name = 1;
+  sym[1].st_info = kElfSymbolTypeObject;
+  sym[1].st_shndx = 1;
   sym[1].st_value = kernel_descriptor_offset;
 
   auto *hash = reinterpret_cast<uint32_t *>(image.data() + hash_offset);
   hash[1] = 2; // nchain: null symbol + kernel descriptor symbol.
 
   return image;
+}
+
+TEST(KernelSymbolTest, ResolvesEachDescriptorInALoadedAllocation) {
+  constexpr uint64_t page_size = 4096;
+  constexpr uint64_t first_descriptor = 0x800;
+  constexpr uint64_t second_descriptor = 0x840;
+  auto image = make_loaded_kernel_symbol_elf(first_descriptor, "first.kd");
+  // Add a second descriptor to the same dynamic symbol table. The ELF
+  // starts on the second page of the allocation and has no section table.
+  constexpr uint64_t symtab_offset = 0x200;
+  constexpr uint64_t strtab_offset = 0x300;
+  constexpr uint64_t dyn_offset = 0x100;
+  constexpr uint64_t hash_offset = 0x380;
+  constexpr char second_name[] = "_Z6secondv.kd";
+  constexpr uint64_t second_name_offset = sizeof("\0first.kd");
+  std::memcpy(image.data() + strtab_offset + second_name_offset, second_name, sizeof(second_name));
+  auto *symbols = reinterpret_cast<Elf64_Sym *>(image.data() + symtab_offset);
+  symbols[2] = symbols[1];
+  symbols[2].st_name = second_name_offset;
+  symbols[2].st_value = second_descriptor;
+  reinterpret_cast<uint32_t *>(image.data() + hash_offset)[1] = 3;
+  auto *dyn = reinterpret_cast<Elf64_Dyn *>(image.data() + dyn_offset);
+  dyn[2].d_un.d_val = second_name_offset + sizeof(second_name);
+
+  std::vector<uint8_t> allocation(page_size, 0);
+  allocation.insert(allocation.end(), image.begin(), image.end());
+  EXPECT_EQ(find_loaded_kernel_symbol(allocation, page_size + first_descriptor), "first");
+  EXPECT_EQ(
+      kernel_display_name(find_loaded_kernel_symbol(allocation, page_size + second_descriptor)),
+      "second");
+  EXPECT_TRUE(find_loaded_kernel_symbol(allocation, page_size + second_descriptor + 64).empty());
+
+  // An offset outside the allocation must never wrap into an in-range read.
+  dyn[0].d_un.d_val = UINT64_MAX;
+  std::memcpy(allocation.data() + page_size, image.data(), image.size());
+  EXPECT_TRUE(find_loaded_kernel_symbol(allocation, page_size + second_descriptor).empty());
 }
 
 TEST(KernelSymbolTest, RejectsDynstrSymbolWithoutTerminator) {

@@ -615,6 +615,7 @@ inline std::vector<uint8_t> make_loaded_kernel_symbol_elf(uint64_t kernel_descri
   Elf64_Ehdr ehdr{};
   std::memcpy(ehdr.e_ident, EI_MAGIC, EI_MAGIC_SIZE);
   ehdr.e_ident[EI_CLASS] = ELFCLASS64;
+  ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
   ehdr.e_ident[EI_OSABI] = ELFOSABI_AMDGPU_HSA;
   ehdr.e_type = ET_DYN;
   ehdr.e_machine = EM_AMDGPU;
@@ -647,6 +648,8 @@ inline std::vector<uint8_t> make_loaded_kernel_symbol_elf(uint64_t kernel_descri
 
   auto *sym = reinterpret_cast<Elf64_Sym *>(image.data() + symtab_offset);
   sym[1].st_name = 1;
+  sym[1].st_info = kElfSymbolTypeObject;
+  sym[1].st_shndx = 1;
   sym[1].st_value = kernel_descriptor_offset;
 
   auto *hash = reinterpret_cast<uint32_t *>(image.data() + hash_offset);

@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 #include "rocjitsu/kmd/server.h"
+#include "rocjitsu/code/kernel_symbol.h"
 #include "rocjitsu/kmd/device/callback_device_backend.h"
 #include "rocjitsu/kmd/linux/kfd_rpc_device.h"
 #include "rocjitsu/kmd/linux/simulated_kfd.h"
@@ -188,8 +189,7 @@ int32_t rj_kmd_server_create(const rj_kmd_device_info_t *info, const rj_kmd_serv
     // Internal consumers receive the full, zero-extended table.
     ops.struct_size = sizeof(ops);
     auto backend = std::make_unique<rocjitsu::kmd::CallbackDeviceBackend>(
-        static_cast<rj_code_arch_t>(info->architecture), info->gpu_id, ops,
-        server->dispatcher);
+        static_cast<rj_code_arch_t>(info->architecture), info->gpu_id, ops, server->dispatcher);
     server->backend = backend.get();
     std::vector<rocjitsu::SimulatedKfd::BackendDevice> devices;
     devices.push_back({info->gpu_id, std::move(backend)});
@@ -330,6 +330,26 @@ int32_t rj_kmd_server_get_stats(const rj_kmd_server_t *server, rj_kmd_server_sta
     stats->pending_doorbells = server->backend->doorbells().pending();
     return 0;
   });
+}
+
+size_t rj_kmd_server_lookup_kernel_name(const void *allocation, size_t allocation_size,
+                                        uint64_t descriptor_offset, char *name,
+                                        size_t name_capacity) {
+  if (!allocation)
+    return 0;
+  try {
+    const auto symbol = rocjitsu::find_loaded_kernel_symbol(
+        {static_cast<const uint8_t *>(allocation), allocation_size}, descriptor_offset);
+    const auto display = rocjitsu::kernel_display_name(symbol);
+    if (display.empty())
+      return 0;
+    const auto size = display.size() + 1;
+    if (name && size <= name_capacity)
+      std::memcpy(name, display.c_str(), size);
+    return size;
+  } catch (...) {
+    return 0;
+  }
 }
 
 } // extern "C"

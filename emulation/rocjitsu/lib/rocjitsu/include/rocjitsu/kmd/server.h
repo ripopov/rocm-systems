@@ -337,6 +337,14 @@ RJ_KMD_API int32_t rj_kmd_server_post_interrupt(rj_kmd_server_t *server, uint32_
 RJ_KMD_API int32_t rj_kmd_server_get_stats(const rj_kmd_server_t *server,
                                            rj_kmd_server_stats_t *stats);
 
+/// Resolve an exact descriptor symbol in a page-aligned GPU allocation
+/// containing a loaded AMDHSA ELF. Reads only the supplied host-visible bytes.
+/// Returns the display name's size including its NUL, or zero if unavailable.
+/// Writes the name only if the entire result fits in the supplied buffer.
+RJ_KMD_API size_t rj_kmd_server_lookup_kernel_name(const void *allocation, size_t allocation_size,
+                                                   uint64_t descriptor_offset, char *name,
+                                                   size_t name_capacity);
+
 #ifdef __cplusplus
 }
 #endif

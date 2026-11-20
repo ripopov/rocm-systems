@@ -29,7 +29,12 @@ target_link_libraries(
     PUBLIC util ${CMAKE_DL_LIBS} Threads::Threads
 )
 
-add_library(rocjitsu_kmd_server SHARED ../server.cpp)
+add_library(
+    rocjitsu_kmd_server
+    SHARED
+    ../server.cpp
+    ../../code/kernel_symbol.cpp
+)
 target_link_libraries(rocjitsu_kmd_server PRIVATE rocjitsu_kmd_core)
 rj_configure_target(rocjitsu_kmd_server PRIVATE_INCLUDES WARNINGS HIDDEN)
 set_target_properties(rocjitsu_kmd_server PROPERTIES VERSION 2.0.0 SOVERSION 2)
